@@ -1,7 +1,7 @@
 // Ollamaチャット & 授業サマリ用の軽量サーバー（依存ライブラリなし）
 //  - "/"            → chat.html を配信
 //  - "/notes"       → notes.html（授業サマリ）を配信
-//  - "/notes/api/*" → ノート保存API（C:\dev\data\notes.json に保存）
+//  - "/notes/api/*" → ノート保存API（<プロジェクトルート>/data/notes.json に保存）
 //  - "/api/*"        → Ollama(127.0.0.1:11434) へリバースプロキシ（許可リスト方式）
 // 画面もAPIも同一オリジンになるので、HTTPS化(tailscale serve)時の
 // 「混在コンテンツ」ブロックとCORSを完全に回避できる。
@@ -16,14 +16,17 @@ const MAX_UPLOAD = 48 * 1024 * 1024; // ファイル抽出(PDF/画像)の最大�
 const MAX_JSON   = 8 * 1024 * 1024;  // ノートJSON APIの最大受信サイズ
 // Ollamaへ中継してよいパス（破壊的/管理系エンドポイントは通さない）
 const PROXY_ALLOW = new Set(["/api/tags", "/api/version", "/api/chat", "/api/generate", "/api/embeddings"]);
+// このファイルは src/ 配下にあるので、ブラウザ配信物は同階層、
+// data/ と tools/ は1つ上（プロジェクトルート）を見る。
+const ROOT = path.join(__dirname, "..");
 const HTML = (name) => path.join(__dirname, name);
-const DATA_DIR = path.join(__dirname, "data");
+const DATA_DIR = path.join(ROOT, "data");
 const NOTES_FILE = path.join(DATA_DIR, "notes.json");
 const CHATS_FILE = path.join(DATA_DIR, "chats.json"); // 会話履歴（全端末共有）
 const TMP_DIR = path.join(DATA_DIR, "tmp");
 const LOG_FILE = path.join(DATA_DIR, "server.log");
 
-// コンソールと C:\dev\data\server.log の両方へ出力（24時間稼働サーバーの恒久ログ）
+// コンソールと data/server.log の両方へ出力（24時間稼働サーバーの恒久ログ）
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;
   console.log(line);
@@ -32,7 +35,7 @@ function log(msg) {
 
 // ===== 外部ツール（PDF抽出 / OCR）のパス解決 =====
 function findPopplerBin() {
-  const root = path.join(__dirname, "tools", "poppler");
+  const root = path.join(ROOT, "tools", "poppler");
   const stack = [root];
   try {
     while (stack.length) {
@@ -51,7 +54,7 @@ const PDFTOTEXT = POPPLER_BIN ? path.join(POPPLER_BIN, "pdftotext.exe") : "pdfto
 const PDFTOPPM  = POPPLER_BIN ? path.join(POPPLER_BIN, "pdftoppm.exe")  : "pdftoppm.exe";
 const TESSERACT = fs.existsSync("C:\\Program Files\\Tesseract-OCR\\tesseract.exe")
   ? "C:\\Program Files\\Tesseract-OCR\\tesseract.exe" : "tesseract.exe";
-const TESSDATA = path.join(__dirname, "tools", "tessdata");
+const TESSDATA = path.join(ROOT, "tools", "tessdata");
 const IMG_EXT = ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "gif"];
 
 function runExe(exe, args) {

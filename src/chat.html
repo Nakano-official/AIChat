@@ -131,7 +131,7 @@ const serverEl=$("server"), modelEl=$("model"), chatEl=$("chat"), inputEl=$("inp
 const coarse = window.matchMedia("(pointer: coarse)").matches;
 
 // ===== 永続化 =====
-// 会話履歴はサーバー(/chats/api/*, C:\dev\data\chats.json)に保存して全端末で共有する。
+// 会話履歴はサーバー(/chats/api/*, data/chats.json)に保存して全端末で共有する。
 // 端末ごとの好み（モデル/温度/システム指示/ペルソナ/最後に開いた会話）は localStorage に残す。
 const LS = {
   convs: "ollama_chat_convs",        // 旧: 端末ローカル会話（移行用に1度だけ参照）

@@ -1,0 +1,145 @@
+# AIchat
+
+ローカルの [Ollama](https://ollama.com/) を使った、**チャット**と**授業ノート要約**の個人用ウェブアプリ。
+
+自宅PCをサーバーにして、同じネットワーク内のスマホやノートPCからブラウザで使うことを想定しています。会話もノートもサーバー側に保存されるので、どの端末から開いても同じ内容が見えます。テキストは外部に送信されません。
+
+- **依存ライブラリゼロ**のNode HTTPサーバー1本で動きます（`node_modules` はCSSビルド時のみ）
+- 静的ページの配信と、Ollamaへの**許可リスト方式**のリバースプロキシを同一オリジンで行うため、CORSも混在コンテンツも発生しません
+- ブラウザ側もCDNを使わないので**オフラインで動作**します
+
+## 機能
+
+### チャット (`/`)
+
+- ストリーミング表示、Markdown描画（コードブロックはコピーボタン付き）
+- 会話履歴はサーバー保存で**全端末共有**。検索・日付グルーピング・リネームに対応
+- 最初のやりとりの後、**AIが会話タイトルを自動生成**（手動で付けた名前は上書きしません）
+- 自分の発言を**編集してそこからやり直す**、最後の回答を再生成
+- 思考モデル対応。思考は畳んで表示し、経過秒数と文字数を表示。**タイムアウト**を設けて考え込んだまま返らない状態を回避できます
+- 役割プリセット（システム指示）、モデル・temperature の切り替え
+- 音声入力（Web Speech API。HTTPSが必要）
+- 生成が中断・失敗しても、そこまでのテキストは失われません
+
+### 授業ノート要約 (`/notes`)
+
+- テキストやファイルを貼り付けて **AIで要約**。科目別に整理
+- 長文はブラウザ側で map-reduce（約6000字ずつ）して、コンテキスト溢れを防ぎます
+- **PDF・画像からのテキスト抽出**（デジタルPDFは `pdftotext`、スキャンPDFと画像はOCR）
+- 入力停止で自動保存されるクイックメモ、Markdown書き出し
+
+## 必要なもの
+
+| | 用途 | 必須 |
+|---|---|---|
+| [Node.js](https://nodejs.org/) | サーバー本体（実行時の依存パッケージなし） | 必須 |
+| [Ollama](https://ollama.com/) | LLM。`ollama pull` でモデルを取得しておく | 必須 |
+| [Poppler](https://poppler.freedesktop.org/) | PDFのテキスト抽出・画像化 | PDFを扱う場合 |
+| [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) | 画像・スキャンPDFのOCR | OCRを使う場合 |
+
+CSSを変更する場合のみ、追加で `npm install`（daisyUI / Tailwind）が必要です。
+
+## 使い方
+
+```bash
+# 1. Ollama を起動し、モデルを用意する
+ollama pull <model-name>
+
+# 2. サーバーを起動する（既定はポート80）
+npm start
+```
+
+ブラウザで `http://localhost/`（授業サマリは `http://localhost/notes`）を開きます。
+
+Windowsでは同梱の `チャット起動.cmd` をダブルクリックしても起動できます。
+
+> **Node はホットリロードしません。** `src/chat-server.js` を編集したら、必ずプロセスを再起動してください。
+
+### 外部ツールの配置
+
+PDF/OCR機能を使う場合は、プロジェクト直下に以下を配置します。
+
+```
+tools/
+├─ poppler/     Poppler 一式（pdftotext.exe を再帰的に探索します）
+└─ tessdata/    Tesseract の言語データ（--tessdata-dir に渡します）
+```
+
+Tesseract 本体は既定のインストール先を探し、見つからなければ `PATH` 上の `tesseract` を使います。
+
+### CSSの再ビルド
+
+`src/chat.html` / `src/notes.html` のクラスや Tailwind の設定を変更したら、`src/app.css` を作り直します。TailwindはJITで使用クラスのみ出力するため、**新しいクラスを追加したら再ビルドが必須**です。
+
+```bash
+npm run css          # 1回だけビルド
+npm run css:watch    # 変更を監視して自動ビルド
+```
+
+`app.css` は静的配信なので、サーバーの再起動は不要です（ブラウザの再読み込みのみ）。
+
+## 設定
+
+`src/chat-server.js` の先頭にまとまっています。
+
+| 定数 | 既定値 | 説明 |
+|---|---|---|
+| `PORT` | `80` | 待ち受けポート |
+| `OLLAMA` | `127.0.0.1:11434` | 中継先のOllama |
+| `PROXY_ALLOW` | 下記5つ | Ollamaへ中継を許可するパス |
+| `MAX_UPLOAD` | 48 MB | ファイル抽出の最大受信サイズ |
+| `MAX_JSON` | 8 MB | JSON APIの最大受信サイズ |
+
+## セキュリティ上の注意
+
+> [!IMPORTANT]
+> **このアプリには認証機構がありません。** `0.0.0.0` で待ち受けるため、**到達できる人は誰でも全ての会話とノートを読み書きできます。**
+>
+> インターネットに直接公開しないでください。localhost、または [Tailscale](https://tailscale.com/) のようなプライベートネットワーク内でのみ使うことを前提にした設計です。信頼できないネットワークで使う場合は、リバースプロキシ等で認証を追加してください。
+
+そのうえで、以下の配慮はしています。
+
+- **許可リスト方式のプロキシ** — Ollamaへ中継するのは `/api/tags`・`/api/version`・`/api/chat`・`/api/generate`・`/api/embeddings` のみ。モデルの削除やpullといった管理系エンドポイントは403で拒否します
+- **受信サイズの上限** — アップロードとJSONの双方に上限があります
+- **Originヘッダの除去** — Ollamaのオリジン保護に弾かれないよう、中継時に `Origin` / `Referer` を落とします
+- **アトミックな書き込み** — ノートと会話履歴は一時ファイル＋`rename` で書き込み、ロックで直列化するため、中断してもファイルが壊れません
+- **XSS対策** — Markdown描画は、HTMLエスケープしてから変換します
+
+## 設計上のメモ
+
+- **生成系は1並列に直列化** — VRAMの小さいGPUでは複数の生成を同時に走らせると詰まるため、`/api/chat` と `/api/generate` はサーバー側のキューで順番に処理します。複数端末から同時にアクセスしても安全です。軽量なGET（`/api/tags` など）はキューを通しません
+- **クライアント切断の検出** — `res` の `close` イベントで検出し、上流のOllamaの生成も止めます。`http.IncomingMessage` の `aborted` イベントはNode 17で非推奨になり新しいNodeでは発火しないため、これに頼ると「停止」してもGPUが回り続けます
+- **JSONストアの共通化** — ノートと会話履歴は同じ読み書き・ロック実装を共有しています
+
+## 構成
+
+```
+.
+├─ src/
+│  ├─ chat-server.js       サーバー本体（配信・プロキシ・API・ファイル抽出）
+│  ├─ chat.html            チャットUI（単一ファイル）
+│  ├─ notes.html           授業サマリUI（単一ファイル）
+│  ├─ shared.js            Markdown描画・クリップボードの共有ユーティリティ
+│  ├─ app.css              ビルド成果物（npm run css で生成）
+│  └─ tailwind-input.css   CSSのビルド元
+├─ data/                   ノート・会話履歴・ログ（自動生成／リポジトリ対象外）
+├─ tools/                  Poppler・Tesseractの言語データ（リポジトリ対象外）
+├─ tailwind.config.js
+├─ package.json
+└─ チャット起動.cmd         Windows用の起動ショートカット
+```
+
+### APIの一覧
+
+| パス | 内容 |
+|---|---|
+| `GET /` `GET /notes` | 各UIの配信 |
+| `GET /app.css` `GET /shared.js` | 静的アセット |
+| `/api/*` | Ollamaへのリバースプロキシ（許可リスト方式） |
+| `/notes/api/{list,get,save,delete}` | ノートの永続化 |
+| `POST /notes/api/extract?name=<filename>` | PDF・画像からのテキスト抽出 |
+| `/chats/api/{list,get,save,delete}` | 会話履歴の永続化 |
+
+## ライセンス
+
+ISC

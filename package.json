@@ -2,11 +2,11 @@
   "name": "aichat",
   "version": "1.0.0",
   "description": "",
-  "main": "chat-server.js",
+  "main": "src/chat-server.js",
   "scripts": {
-    "start": "node chat-server.js",
-    "css": "tailwindcss -i ./tailwind-input.css -o ./app.css --minify",
-    "css:watch": "tailwindcss -i ./tailwind-input.css -o ./app.css --watch"
+    "start": "node src/chat-server.js",
+    "css": "tailwindcss -i ./src/tailwind-input.css -o ./src/app.css --minify",
+    "css:watch": "tailwindcss -i ./src/tailwind-input.css -o ./src/app.css --watch"
   },
   "keywords": [],
   "author": "",

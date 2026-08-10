@@ -1,6 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
-  content: ["./chat.html", "./notes.html"],
+  content: ["./src/chat.html", "./src/notes.html"],
   theme: { extend: {} },
   plugins: [require("daisyui")],
   daisyui: {
