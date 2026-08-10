@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="aichat">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="AIチャット" />
+<meta name="theme-color" content="#0f1117" />
+<title>AIチャット</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body class="bg-base-100 text-base-content h-dvh overflow-hidden">
+<div class="drawer md:drawer-open h-dvh">
+  <input id="drawer-toggle" type="checkbox" class="drawer-toggle" />
+
+  <!-- ===== メイン ===== -->
+  <div class="drawer-content flex flex-col h-dvh min-w-0">
+    <header class="navbar min-h-0 flex-wrap gap-1.5 bg-base-200 border-b border-base-300 px-2 sm:px-3 py-2"
+            style="padding-top: calc(0.5rem + env(safe-area-inset-top));">
+      <label for="drawer-toggle" class="btn btn-ghost btn-square btn-sm md:hidden" aria-label="履歴">☰</label>
+      <h1 class="text-base font-semibold whitespace-nowrap mr-1">🦙<span class="hidden sm:inline"> AIチャット</span></h1>
+      <select id="model" class="select select-bordered select-sm flex-1 min-w-0 sm:flex-none sm:w-44"><option>読み込み中...</option></select>
+      <a href="/notes" class="btn btn-ghost btn-sm px-2 whitespace-nowrap" title="授業サマリ">📚<span class="hidden sm:inline ml-1">授業サマリ</span></a>
+      <button id="settingsBtn" class="btn btn-ghost btn-square btn-sm" title="設定">⚙</button>
+      <span id="status" class="text-xs opacity-70 whitespace-nowrap ml-auto basis-full text-right sm:basis-auto">接続確認中...</span>
+    </header>
+
+    <!-- チャット本文。相対配置にして「最新へ」ボタンを重ねる -->
+    <div class="relative flex-1 min-h-0">
+      <main id="chat" class="h-full overflow-y-auto overflow-x-hidden px-4 py-5 space-y-1"></main>
+      <button id="tobottom" title="最新へ"
+              class="btn btn-sm btn-circle absolute bottom-3 left-1/2 -translate-x-1/2 bg-base-300 border-base-300 shadow-lg hidden">↓</button>
+    </div>
+
+    <footer class="flex items-end gap-2 bg-base-200 border-t border-base-300 px-3 py-3"
+            style="padding-bottom: calc(0.75rem + env(safe-area-inset-bottom));">
+      <button id="mic" class="btn btn-ghost btn-square" title="音声入力">🎤</button>
+      <textarea id="input" rows="1"
+        class="textarea textarea-bordered flex-1 min-w-0 resize-none min-h-12 max-h-44 text-base leading-relaxed"
+        placeholder="メッセージ"></textarea>
+      <!-- 生成中は同じボタンが「停止」に変わる（モバイルの幅を節約） -->
+      <button id="send" class="btn btn-primary px-4">送信</button>
+    </footer>
+  </div>
+
+  <!-- ===== サイドバー ===== -->
+  <div class="drawer-side z-20">
+    <label for="drawer-toggle" class="drawer-overlay"></label>
+    <aside class="flex flex-col w-64 h-dvh bg-base-200 border-r border-base-300">
+      <div class="p-3 space-y-2">
+        <button id="newchat" class="btn btn-primary btn-block btn-sm">＋ 新しいチャット</button>
+        <input id="search" type="search" class="input input-bordered input-sm w-full" placeholder="🔍 会話を検索" />
+      </div>
+      <div id="convlist" class="flex-1 overflow-y-auto px-2 pb-3"></div>
+    </aside>
+  </div>
+</div>
+
+<!-- ===== 設定モーダル ===== -->
+<dialog id="settings" class="modal">
+  <div class="modal-box bg-base-200 border border-base-300">
+    <h3 class="text-lg font-semibold mb-4">設定</h3>
+    <div class="space-y-3">
+      <div>
+        <label class="text-xs opacity-70">サーバー</label>
+        <input id="server" type="text" class="input input-bordered input-sm w-full mt-1" />
+      </div>
+      <div>
+        <label class="text-xs opacity-70">役割プリセット</label>
+        <div class="flex gap-2 mt-1">
+          <select id="persona" class="select select-bordered select-sm flex-1"></select>
+          <button id="savePersona" class="btn btn-sm" title="現在のシステム指示を新規プリセットとして保存">＋保存</button>
+        </div>
+      </div>
+      <div>
+        <label class="text-xs opacity-70">システム指示</label>
+        <input id="system" type="text" class="input input-bordered input-sm w-full mt-1" placeholder="例：あなたはプロの料理人です。" />
+      </div>
+      <div>
+        <label class="text-xs opacity-70">創造性 (temperature)</label>
+        <div class="flex items-center gap-3 mt-1">
+          <input id="temp" type="range" min="0" max="1.5" step="0.1" value="0.8" class="range range-primary range-sm flex-1" />
+          <span id="tempVal" class="tabular-nums w-9 text-right">0.8</span>
+        </div>
+      </div>
+      <div>
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input id="think" type="checkbox" class="toggle toggle-primary toggle-sm" />
+          <span class="text-xs opacity-70">思考モード（qwen3.5 等のみ）</span>
+        </label>
+        <p class="text-xs opacity-50 mt-1">答える前に考えます。精度が上がることもありますが大幅に遅くなり、複雑な質問では考え続けて答えが返らないことがあります。</p>
+      </div>
+      <div>
+        <label class="text-xs opacity-70">思考のタイムアウト（秒 / 0で無効）</label>
+        <input id="thinkTimeout" type="number" min="0" max="600" step="10" class="input input-bordered input-sm w-full mt-1" />
+        <p class="text-xs opacity-50 mt-1">思考が始まってからこの時間を過ぎても回答が始まらない場合に停止し、再実行の選択肢を出します。回答が出はじめた時点で解除されるので、長い回答が途中で切られることはありません。</p>
+      </div>
+      <div>
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input id="autoTitle" type="checkbox" class="toggle toggle-primary toggle-sm" />
+          <span class="text-xs opacity-70">タイトルをAIに付けさせる</span>
+        </label>
+        <p class="text-xs opacity-50 mt-1">最初のやりとりの後に短い見出しを自動生成します（手動で変更した会話には作用しません）。</p>
+      </div>
+      <div>
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input id="enterSend" type="checkbox" class="toggle toggle-primary toggle-sm" />
+          <span class="text-xs opacity-70">Enterキーで送信する</span>
+        </label>
+        <p class="text-xs opacity-50 mt-1">OFF なら Enter は改行、送信は送信ボタンか Ctrl+Enter。スマホでは既定でOFFです。</p>
+      </div>
+    </div>
+    <div class="modal-action">
+      <form method="dialog"><button class="btn btn-sm">閉じる</button></form>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<script src="/shared.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const serverEl=$("server"), modelEl=$("model"), chatEl=$("chat"), inputEl=$("input"),
+      statusEl=$("status"), systemEl=$("system"), personaEl=$("persona"),
+      tempEl=$("temp"), tempValEl=$("tempVal"), thinkEl=$("think"),
+      searchEl=$("search"), toBottomEl=$("tobottom"), sendEl=$("send");
+
+// タッチ端末かどうか。Enterの既定挙動・自動フォーカスの判断に使う
+const coarse = window.matchMedia("(pointer: coarse)").matches;
+
+// ===== 永続化 =====
+// 会話履歴はサーバー(/chats/api/*, C:\dev\data\chats.json)に保存して全端末で共有する。
+// 端末ごとの好み（モデル/温度/システム指示/ペルソナ/最後に開いた会話）は localStorage に残す。
+const LS = {
+  convs: "ollama_chat_convs",        // 旧: 端末ローカル会話（移行用に1度だけ参照）
+  migrated: "ollama_chat_migrated",  // サーバー移行済みフラグ
+  cur: "ollama_chat_cur",            // この端末で最後に開いた会話ID
+  personas: "ollama_chat_personas", settings: "ollama_chat_settings",
+};
+const DEFAULT_PERSONAS = [
+  { name: "デフォルト", prompt: "" },
+  { name: "料理人", prompt: "あなたはプロの料理人です。家庭で作れる具体的なレシピを、材料リストと手順に分けて日本語で提案してください。" },
+  { name: "翻訳", prompt: "あなたは優秀な翻訳家です。入力文を自然な日本語↔英語に翻訳し、翻訳結果のみを出力してください。" },
+  { name: "英文添削", prompt: "You are an English writing tutor. Correct the user's English, show the corrected version, then briefly explain the key fixes in Japanese." },
+  { name: "コードレビュー", prompt: "あなたは経験豊富なソフトウェアエンジニアです。コードの問題点と改善案を具体的に、日本語で指摘してください。" },
+];
+let personas = load(LS.personas, DEFAULT_PERSONAS);
+let settings = load(LS.settings, { model: "", temp: 0.8, system: "", server: "", think: false });
+if(settings.autoTitle === undefined) settings.autoTitle = true;
+if(settings.enterSend === undefined) settings.enterSend = !coarse;   // スマホは既定で「Enter=改行」
+if(settings.thinkTimeout === undefined) settings.thinkTimeout = 60;  // 秒。0で無効
+let convList = [];                 // サーバーの会話一覧（メタのみ: {id,title,createdAt,updatedAt}）
+let cur = null;                    // 現在開いている会話（messages 込み）
+let curId = load(LS.cur, null);    // この端末で最後に開いていた会話ID
+let msgEls = [];                   // cur.messages と同じ並びのDOM要素（差分更新のため保持）
+let controller = null;
+
+function load(k, d){ try{ const v=localStorage.getItem(k); return v?JSON.parse(v):d; }catch(e){ return d; } }
+function save(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+function genId(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+function focusInput(){ if(!coarse) inputEl.focus(); }   // スマホで勝手にキーボードを出さない
+
+// escapeHtml・inline・renderMarkdown・copyText は shared.js から提供される
+
+// ===== サーバー会話ストア =====
+async function loadList(){
+  try{ convList = await (await fetch("/chats/api/list")).json(); }
+  catch(e){ convList = []; }
+  renderSidebar();
+}
+async function saveCur(){
+  if(!cur || !cur.messages.length) return;   // 空の会話はまだ保存しない
+  try{
+    const saved = await (await fetch("/chats/api/save", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ id: cur.id, title: cur.title, messages: cur.messages }),
+    })).json();
+    cur.id = saved.id; curId = saved.id; save(LS.cur, curId);
+  }catch(e){ setStatus("保存に失敗: "+e.message,"err"); }
+  await loadList();
+}
+
+// ===== 会話の新規 / 切替 / 削除 / 改名 =====
+function newConv(){
+  cur = { id: genId(), title: "新しいチャット", messages: [] };
+  curId = cur.id; save(LS.cur, curId);
+  renderSidebar(); renderMessages(); focusInput(); closeDrawer();
+}
+async function openConv(id){
+  try{
+    cur = await (await fetch("/chats/api/get?id="+encodeURIComponent(id))).json();
+    curId = cur.id; save(LS.cur, curId);
+    renderSidebar(); renderMessages(); closeDrawer();
+  }catch(e){ setStatus("読み込み失敗","err"); }
+}
+async function deleteConv(id, title){
+  if(!confirm("「" + (title || "新しいチャット") + "」を削除します。\n元に戻せません。")) return;
+  await fetch("/chats/api/delete", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id}) });
+  if(curId === id){ cur = null; curId = null; save(LS.cur, null); }
+  await loadList();
+  if(!cur){ if(convList.length) await openConv(convList[0].id); else newConv(); }
+}
+async function renameConv(id, title){
+  const t = prompt("会話のタイトル", title || "");
+  if(t === null) return;
+  const name = t.trim(); if(!name) return;
+  if(cur && cur.id === id){                       // 開いている会話ならそのまま保存
+    cur.title = name;
+    if(cur.messages.length) await saveCur(); else renderSidebar();
+    return;
+  }
+  try{                                            // 他の会話は本文を取り直してタイトルだけ差し替える
+    const c = await (await fetch("/chats/api/get?id="+encodeURIComponent(id))).json();
+    await fetch("/chats/api/save", { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ id, title: name, messages: c.messages || [] }) });
+    await loadList();
+  }catch(e){ setStatus("名前の変更に失敗","err"); }
+}
+
+// ===== サイドバー =====
+// 更新日でグルーピングする。convList は updatedAt の降順で届く。
+function dayBucket(ts){
+  if(!ts) return "それ以前";
+  const startOf = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const diff = Math.round((startOf(new Date()) - startOf(new Date(ts))) / 86400000);
+  if(diff <= 0) return "今日";
+  if(diff === 1) return "昨日";
+  if(diff < 7) return "今週";
+  if(diff < 30) return "今月";
+  return "それ以前";
+}
+function renderSidebar(){
+  const box = $("convlist"); box.innerHTML = "";
+  const q = (searchEl.value || "").trim().toLowerCase();
+  let items = [...convList];
+  // まだ保存されていない新規会話（一覧に無い）は先頭に出す
+  if(cur && !items.find(c => c.id === cur.id)) items.unshift({ id: cur.id, title: cur.title, updatedAt: Date.now() });
+  if(q) items = items.filter(c => (c.title || "").toLowerCase().includes(q));
+  if(!items.length){
+    const p = document.createElement("p");
+    p.className = "px-3 py-4 text-xs opacity-40";
+    p.textContent = q ? "該当する会話はありません" : "まだ会話がありません";
+    box.appendChild(p); return;
+  }
+  let group = "";
+  items.forEach(c => {
+    const g = dayBucket(c.updatedAt);
+    if(g !== group){
+      group = g;
+      const h = document.createElement("div");
+      h.className = "px-3 pt-3 pb-1 text-[11px] font-semibold opacity-40";
+      h.textContent = g;
+      box.appendChild(h);
+    }
+    box.appendChild(convRow(c));
+  });
+}
+function convRow(c){
+  const row = document.createElement("div");
+  row.className = "flex items-center gap-0.5 rounded-lg pl-3 pr-1 py-2 text-sm cursor-pointer transition-colors "
+    + (c.id===curId ? "bg-primary/15 text-base-content" : "text-base-content/70 hover:bg-base-300/70");
+  row.onclick = () => openConv(c.id);
+  const title = document.createElement("span");
+  title.className = "flex-1 truncate";
+  title.textContent = c.title || "新しいチャット";
+  title.title = c.title || "";
+  // タッチ端末にはホバーが無いので、操作ボタンは常時表示にする
+  const ren = document.createElement("button");
+  ren.className = "btn btn-ghost btn-xs btn-square opacity-40 hover:opacity-100";
+  ren.textContent = "✎"; ren.title = "名前を変更";
+  ren.onclick = (e) => { e.stopPropagation(); renameConv(c.id, c.title); };
+  const del = document.createElement("button");
+  del.className = "btn btn-ghost btn-xs btn-square opacity-40 hover:opacity-100 hover:text-error";
+  del.textContent = "🗑"; del.title = "削除";
+  del.onclick = (e) => { e.stopPropagation(); deleteConv(c.id, c.title); };
+  row.append(title, ren, del);
+  return row;
+}
+
+// ===== スクロール追従 =====
+// 下端付近にいるときだけ自動で追いかける。上に遡って読んでいる間は動かさない。
+let stick = true;
+function nearBottom(){ return chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 80; }
+chatEl.addEventListener("scroll", () => {
+  stick = nearBottom();
+  toBottomEl.classList.toggle("hidden", stick);
+});
+function scrollDown(force){
+  if(!force && !stick) return;
+  chatEl.scrollTop = chatEl.scrollHeight;
+  stick = true; toBottomEl.classList.add("hidden");
+}
+toBottomEl.onclick = () => scrollDown(true);
+
+// ===== メッセージ描画 =====
+function buildShell(role){
+  const wrap = document.createElement("div");
+  wrap.className = "chat " + (role === "user" ? "chat-end" : "chat-start");
+  const head = document.createElement("div");
+  head.className = "chat-header text-xs opacity-50 mb-1";
+  head.textContent = role === "user" ? "あなた" : "AI";
+  const bubble = document.createElement("div");
+  bubble.className = "chat-bubble max-w-[min(90%,52rem)] min-w-0 break-words " + (role === "user"
+    ? "chat-bubble-primary whitespace-pre-wrap"
+    : "bg-base-200 text-base-content");
+  const foot = document.createElement("div");
+  foot.className = "chat-footer mt-1 flex flex-wrap items-center gap-1";
+  wrap.append(head, bubble, foot);
+  wrap._bubble = bubble; wrap._foot = foot;
+  if(role !== "user"){
+    // 思考は常に畳んだまま表示する。生成中も開かない（開くと長い思考で画面が埋まるため）。
+    // 動いていることは summary の経過秒数と文字数で示し、開いた時も max-h で高さを抑える。
+    const det = document.createElement("details");
+    det.className = "text-xs mb-2 hidden";
+    const sum = document.createElement("summary");
+    sum.className = "cursor-pointer select-none opacity-60";
+    sum.textContent = "💭 思考";
+    const tbody = document.createElement("div");
+    tbody.className = "whitespace-pre-wrap mt-1 pl-3 border-l border-base-content/20 opacity-60 max-h-48 overflow-y-auto";
+    det.append(sum, tbody);
+    const ans = document.createElement("div");
+    bubble.append(det, ans);
+    wrap._think = det; wrap._thinkSum = sum; wrap._thinkBody = tbody; wrap._ans = ans;
+  }
+  return wrap;
+}
+// 生成途中はコードフェンスが閉じていないので、描画用に仮の閉じを足す
+function balanceFences(t){ return ((t.match(/```/g) || []).length % 2) ? t + "\n```" : t; }
+// 畳んだ状態でも進捗が分かるよう、見出しに経過秒数と文字数を出す
+function thinkLabel(m, streaming){
+  const chars = (m.thinking || "").length.toLocaleString();
+  const sec = m.thinkMs ? (m.thinkMs / 1000).toFixed(1) + "秒 / " : "";
+  let s = (streaming ? "💭 思考中… " : "💭 思考 ") + sec + chars + "字";
+  // タイムアウトを無効にしている時だけ注意を出す（有効なら自動で止まるので不要）
+  if(streaming && !m.content && !settings.thinkTimeout && m.thinkMs > 60000)
+    s += "  ⚠️ 長引いています（停止して思考OFFで再試行を）";
+  return s;
+}
+function paintMessage(wrap, m, streaming){
+  if(m.role === "user"){ wrap._bubble.textContent = m.content; return; }
+  if(m.thinking){
+    wrap._think.classList.remove("hidden");
+    wrap._thinkSum.textContent = thinkLabel(m, streaming);
+    wrap._thinkBody.textContent = m.thinking;
+    // open にはしない。開くかどうかはユーザーに任せる
+    if(wrap._think.open && streaming) wrap._thinkBody.scrollTop = wrap._thinkBody.scrollHeight;
+  } else wrap._think.classList.add("hidden");
+  wrap._ans.className = "md" + (streaming ? " cursor" : "");
+  wrap._ans.innerHTML = renderMarkdown(streaming ? balanceFences(m.content) : m.content);
+}
+function mkBtn(label, fn){
+  const b = document.createElement("button");
+  b.className = "btn btn-ghost btn-xs";
+  b.textContent = label;
+  b.onclick = () => fn(b);
+  return b;
+}
+function attachActions(wrap, m, idx){
+  const foot = wrap._foot; foot.innerHTML = "";
+  if(!m.content && !m.thinking) return;
+  foot.appendChild(mkBtn("コピー", async (b) => {
+    const ok = await copyText(m.content);
+    b.textContent = ok ? "コピー済" : "失敗";
+    setTimeout(() => b.textContent = "コピー", 1200);
+  }));
+  if(m.role === "user") foot.appendChild(mkBtn("✎ 編集", () => editMessage(idx)));
+}
+// 「再生成」は最後のAI発言にだけ出す。全再描画せずここで付け外しする。
+function refreshActions(){
+  msgEls.forEach((wrap, i) => {
+    const m = cur && cur.messages[i]; if(!m) return;
+    const old = wrap._foot.querySelector("[data-regen]");
+    const want = m.role === "assistant" && i === cur.messages.length - 1 && !controller;
+    if(want && !old){
+      const b = mkBtn("↻ 再生成", () => regenerate());
+      b.dataset.regen = "1";
+      wrap._foot.appendChild(b);
+    } else if(!want && old) old.remove();
+  });
+}
+function addMsgEl(m, idx){
+  const wrap = buildShell(m.role);
+  paintMessage(wrap, m, false);
+  attachActions(wrap, m, idx);
+  chatEl.appendChild(wrap); msgEls.push(wrap);
+  return wrap;
+}
+function emptyState(){
+  const d = document.createElement("div");
+  d.id = "emptystate";
+  d.className = "h-full flex flex-col items-center justify-center gap-2 text-center opacity-40 px-6";
+  const icon = document.createElement("div"); icon.className = "text-4xl"; icon.textContent = "🦙";
+  const p = document.createElement("p"); p.className = "text-sm"; p.textContent = "メッセージを送ると会話が始まります";
+  d.append(icon, p);
+  return d;
+}
+// 会話を開いた直後・編集後だけ使う全描画。生成のたびには呼ばない。
+function renderMessages(){
+  chatEl.innerHTML = ""; msgEls = [];
+  if(!cur) return;
+  if(!cur.messages.length){ chatEl.appendChild(emptyState()); return; }
+  cur.messages.forEach((m, i) => addMsgEl(m, i));
+  refreshActions();
+  scrollDown(true);
+}
+function errBox(msg){
+  const d = document.createElement("div");
+  d.className = "alert alert-error text-sm my-2";
+  d.textContent = "⚠️ エラー: " + msg;
+  return d;
+}
+
+// ===== ユーザー発言の編集（そこから会話をやり直す） =====
+function editMessage(idx){
+  if(controller) return;
+  const wrap = msgEls[idx]; if(!wrap) return;
+  const orig = cur.messages[idx].content;
+  const bubble = wrap._bubble;
+  bubble.classList.remove("chat-bubble-primary", "whitespace-pre-wrap");
+  bubble.innerHTML = "";
+  const ta = document.createElement("textarea");
+  ta.className = "textarea textarea-bordered w-[min(78vw,34rem)] max-w-full text-base bg-base-100 text-base-content resize-none";
+  ta.value = orig;
+  ta.rows = Math.min(12, orig.split("\n").length + 1);
+  const row = document.createElement("div");
+  row.className = "flex justify-end gap-2 mt-2";
+  const cancel = document.createElement("button");
+  cancel.className = "btn btn-ghost btn-sm"; cancel.textContent = "取消";
+  cancel.onclick = () => renderMessages();
+  const ok = document.createElement("button");
+  ok.className = "btn btn-primary btn-sm"; ok.textContent = "送信しなおす";
+  ok.onclick = async () => {
+    const v = ta.value.trim(); if(!v) return;
+    cur.messages = cur.messages.slice(0, idx);          // ここから後ろは捨ててやり直す
+    cur.messages.push({ role: "user", content: v });
+    renderMessages();
+    await saveCur();
+    await generate();
+  };
+  row.append(cancel, ok);
+  bubble.append(ta, row);
+  wrap._foot.innerHTML = "";
+  ta.focus();
+}
+
+// ===== サーバー / モデル =====
+const base = () => serverEl.value.replace(/\/+$/,"");
+function setStatus(t, cls=""){
+  statusEl.textContent=t;
+  statusEl.className = "text-xs whitespace-nowrap ml-auto basis-full text-right sm:basis-auto " +
+    (cls==="ok" ? "text-success" : cls==="err" ? "text-error" : "opacity-70");
+}
+async function loadModels(){
+  setStatus("接続確認中..."); modelEl.innerHTML="";
+  try{
+    const r = await fetch(base()+"/api/tags"); if(!r.ok) throw new Error("HTTP "+r.status);
+    const names = ((await r.json()).models||[]).map(m=>m.name);
+    if(!names.length){ modelEl.innerHTML="<option>モデルなし</option>"; setStatus("モデルなし","err"); return; }
+    modelEl.innerHTML = names.map(n=>`<option>${escapeHtml(n)}</option>`).join("");
+    if(settings.model && names.includes(settings.model)) modelEl.value = settings.model;
+    setStatus("接続OK","ok");
+  }catch(e){ modelEl.innerHTML="<option>接続失敗</option>"; setStatus("接続できません: "+e.message,"err"); }
+}
+
+// ===== 生成 =====
+function setBusy(b){
+  sendEl.textContent = b ? "■ 停止" : "送信";
+  sendEl.className = "btn px-4 " + (b ? "btn-error" : "btn-primary");
+}
+async function send(){
+  const text = inputEl.value.trim(); if(!text || controller) return;
+  if(!cur) newConv();
+  inputEl.value=""; autoGrow();
+  const es = $("emptystate"); if(es) es.remove();
+  const m = { role:"user", content:text };
+  cur.messages.push(m);
+  addMsgEl(m, cur.messages.length - 1);
+  if(cur.title === "新しいチャット") cur.title = text.slice(0,24);
+  refreshActions(); renderSidebar(); scrollDown(true);
+  await saveCur();           // ユーザー発言を即サーバー保存（他端末からも見える）
+  await generate();
+}
+async function regenerate(){
+  if(controller || !cur) return;
+  if(cur.messages.at(-1)?.role === "assistant"){
+    cur.messages.pop();
+    const w = msgEls.pop(); if(w) w.remove();
+  }
+  await generate();
+}
+// opts.think     : 思考モードの明示指定（未指定なら設定トグルに従う）
+// opts.noTimeout : この回だけ思考タイムアウトを無効にする（「もう一度（思考ON）」用）
+async function generate(opts = {}){
+  // 会話履歴は role/content だけ送る（thinking はモデルに渡さない）
+  const payload = cur.messages.map(m => ({ role: m.role, content: m.content }));
+  if(systemEl.value.trim()) payload.unshift({ role:"system", content:systemEl.value.trim() });
+
+  // 前回のエラー表示・履歴に残さなかった吹き出しを片付ける
+  chatEl.querySelectorAll(".alert-error, [data-orphan]").forEach(el => el.remove());
+  const wrap = buildShell("assistant");
+  chatEl.appendChild(wrap);
+  controller = new AbortController();
+  setBusy(true); refreshActions(); scrollDown(true);
+
+  const useThink = opts.think !== undefined ? opts.think : thinkEl.checked;
+  const tmo = opts.noTimeout ? 0 : (settings.thinkTimeout || 0);
+
+  let full="", thought="", errMsg="", lastPaint=0, thinkMs=0;
+  const t0 = performance.now();
+  const paint = () => { paintMessage(wrap, { role:"assistant", content: full, thinking: thought, thinkMs }, true); scrollDown(false); };
+  paint();
+
+  // 思考タイムアウト。「思考が始まってから」計り、回答が1文字でも出たら解除する。
+  // モデルのロード待ち（初回は数十秒かかる）や、長い回答の途中で誤爆させないための条件。
+  let thinkTimer = null, autoStop = false;
+  const armTimer = () => {
+    if(thinkTimer || !tmo || full) return;   // 既に回答が始まっていたら二度と武装しない
+    thinkTimer = setTimeout(() => { autoStop = true; if(controller) controller.abort(); }, tmo * 1000);
+  };
+  const clearTimer = () => { if(thinkTimer){ clearTimeout(thinkTimer); thinkTimer = null; } };
+
+  const post = (t) => fetch(base()+"/api/chat", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ model: modelEl.value, messages: payload, stream:true, think: t,
+                           options:{ temperature: parseFloat(tempEl.value), num_ctx: 8192 } }),
+    signal: controller.signal,
+  });
+
+  try{
+    let r = await post(useThink);
+    // 思考非対応モデル（llama3.1 等）に think:true を送ると 400 が返る。OFFで1度だけやり直す
+    if(!r.ok && useThink){
+      const t = await r.text();
+      if(/does not support thinking/i.test(t)){
+        setStatus("このモデルは思考モード非対応のためOFFで実行","err");
+        r = await post(false);
+      } else throw new Error("HTTP "+r.status+" "+t);
+    }
+    if(!r.ok) throw new Error("HTTP "+r.status+" "+(await r.text()));
+    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf="";
+    while(true){
+      const { done, value } = await reader.read(); if(done) break;
+      buf += dec.decode(value, {stream:true});
+      const lines = buf.split("\n"); buf = lines.pop();
+      let dirty = false;
+      for(const line of lines){
+        if(!line.trim()) continue;
+        let o; try{ o = JSON.parse(line); }catch(_){ continue; } // 不正な行はスキップ
+        if(o.error) throw new Error(o.error);
+        if(o.message?.thinking){ thought += o.message.thinking; thinkMs = performance.now() - t0; armTimer(); dirty = true; }
+        if(o.message?.content){ full += o.message.content; clearTimer(); dirty = true; }
+      }
+      // Markdownの再描画は重いので ~120ms に間引く
+      if(dirty){
+        const now = performance.now();
+        if(now - lastPaint > 120){ lastPaint = now; paint(); }
+      }
+    }
+    setStatus("接続OK","ok");
+  }catch(e){
+    if(e.name !== "AbortError"){ errMsg = e.message; setStatus("エラー","err"); }
+  }finally{
+    clearTimer(); controller = null; setBusy(false);
+    if(full){
+      // 中断・エラーでも、そこまで生成された内容は残して保存する
+      const m = { role:"assistant", content: full };
+      if(thought){ m.thinking = thought; m.thinkMs = Math.round(thinkMs); }
+      cur.messages.push(m);
+      paintMessage(wrap, m, false);
+      attachActions(wrap, m, cur.messages.length - 1);
+      msgEls.push(wrap);
+      if(errMsg){
+        const s = document.createElement("span");
+        s.className = "text-xs text-error"; s.textContent = "⚠️ " + errMsg;
+        wrap._foot.appendChild(s);
+      }
+      refreshActions();
+      await saveCur();
+      autoTitle();             // 待たない（サーバー側で順番に処理される）
+    } else if(thought){
+      // 思考だけで回答に辿り着かなかった場合。
+      // 空のAI発言を履歴に残すと次回の推論を汚すので保存はせず、画面にだけ畳んで残す。
+      wrap.dataset.orphan = "1";
+      paintMessage(wrap, { role:"assistant", content:"", thinking: thought, thinkMs: Math.round(thinkMs) }, false);
+      const s = document.createElement("span");
+      s.className = "text-xs text-warning";
+      s.textContent = autoStop
+        ? "⚠️ " + tmo + "秒たっても回答が始まらないため停止しました（履歴には保存されません）"
+        : "⚠️ 回答が出る前に終了しました" + (errMsg ? "（" + errMsg + "）" : "") + "（履歴には保存されません）";
+      wrap._foot.appendChild(s);
+      // やり直しはユーザーに選ばせる。勝手に再送信はしない。
+      const off = mkBtn("思考OFFで再実行", () => { if(!controller) generate({ think:false }); });
+      off.className = "btn btn-primary btn-xs";
+      const on = mkBtn("もう一度（思考ON）", () => { if(!controller) generate({ think:true, noTimeout:true }); });
+      wrap._foot.append(off, on);
+      refreshActions();
+      scrollDown(false);
+    } else {
+      wrap.remove();
+      if(errMsg) chatEl.appendChild(errBox(errMsg));
+      refreshActions();
+      scrollDown(false);
+    }
+    focusInput();
+  }
+}
+
+// 最初のやりとりの直後だけ、AIに短い見出しを付けさせる。
+// タイトルが「先頭24文字」の既定のままのときに限るので、手動リネームは上書きしない。
+async function autoTitle(){
+  if(!settings.autoTitle || !cur || cur.messages.length !== 2) return;
+  const first = cur.messages[0];
+  if(first.role !== "user" || cur.title !== first.content.slice(0,24)) return;
+  const src = cur.messages.map(m => (m.role === "user" ? "ユーザー: " : "AI: ") + m.content.slice(0,600)).join("\n");
+  const ask = "次の会話に日本語で15文字以内の見出しを1つ付けてください。見出しだけを出力し、鉤括弧・句読点・説明は付けないこと。\n\n" + src;
+  try{
+    const r = await fetch(base()+"/api/chat", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ model: modelEl.value, messages:[{role:"user",content:ask}], stream:false, think:false,
+                             options:{ temperature:0.2, num_predict:32, num_ctx:4096 } }),
+    });
+    if(!r.ok) return;
+    let t = ((await r.json()).message?.content || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+    t = (t.split("\n").find(l => l.trim()) || "").trim();
+    t = t.replace(/^[「『"']+/, "").replace(/[」』"'。.]+$/, "").trim().slice(0, 30);
+    if(!t || !cur || cur.messages.length !== 2) return;   // 待っている間に会話が進んでいたら諦める
+    cur.title = t;
+    await saveCur();
+  }catch(e){}
+}
+
+// コード内コピーボタン（イベント委譲）
+chatEl.addEventListener("click", (e) => {
+  const cb = e.target.closest(".copybtn");
+  if(cb){ const code = document.getElementById(cb.dataset.code); copyText(code.textContent); cb.textContent="コピー済"; setTimeout(()=>cb.textContent="コピー",1200); }
+});
+
+// ===== 役割プリセット（端末ローカル） =====
+function renderPersonas(){
+  personaEl.innerHTML = personas.map((p,i)=>`<option value="${i}">${escapeHtml(p.name)}</option>`).join("");
+}
+personaEl.onchange = () => { const p = personas[+personaEl.value]; if(p){ systemEl.value = p.prompt; settings.system = p.prompt; save(LS.settings, settings); } };
+$("savePersona").onclick = () => {
+  const name = prompt("プリセット名を入力:", ""); if(!name) return;
+  personas.push({ name, prompt: systemEl.value.trim() }); save(LS.personas, personas);
+  renderPersonas(); personaEl.value = personas.length-1;
+};
+
+// ===== 音声入力（Web Speech API）=====
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recog = null, recording = false;
+if(SR){
+  recog = new SR(); recog.lang="ja-JP"; recog.interimResults=true; recog.continuous=false;
+  let baseText = "";
+  recog.onresult = (e) => {
+    let txt = "";
+    for(let i=0;i<e.results.length;i++) txt += e.results[i][0].transcript;
+    inputEl.value = (baseText ? baseText+" " : "") + txt; autoGrow();
+  };
+  recog.onstart = () => { recording=true; baseText=inputEl.value.trim(); $("mic").classList.add("btn-error"); };
+  recog.onend = () => { recording=false; $("mic").classList.remove("btn-error"); focusInput(); };
+  recog.onerror = (e) => {
+    recording=false; $("mic").classList.remove("btn-error");
+    if(e.error==="not-allowed"||e.error==="service-not-allowed")
+      alert("マイクが使えません。\nブラウザのマイク許可、またはHTTPS接続が必要な場合があります（http://aichat ではブロックされることがあります）。");
+  };
+  $("mic").onclick = () => { if(recording) recog.stop(); else { try{ recog.start(); }catch(e){} } };
+} else {
+  $("mic").style.display = "none"; // 非対応ブラウザでは隠す
+}
+
+// ===== UI操作 =====
+function autoGrow(){ inputEl.style.height="auto"; inputEl.style.height = Math.min(inputEl.scrollHeight,176)+"px"; }
+function closeDrawer(){ const t = $("drawer-toggle"); if(t) t.checked = false; }   // モバイルのドロワーを閉じる
+function syncEnterHint(){
+  inputEl.placeholder = settings.enterSend
+    ? "メッセージ（Enterで送信 / Shift+Enterで改行）"
+    : "メッセージ（Ctrl+Enterで送信）";
+}
+$("newchat").onclick = newConv;
+$("settingsBtn").onclick = () => $("settings").showModal();
+sendEl.onclick = () => { if(controller) controller.abort(); else send(); };
+searchEl.oninput = renderSidebar;
+inputEl.addEventListener("input", autoGrow);
+inputEl.addEventListener("keydown", (e) => {
+  if(e.key !== "Enter") return;
+  if(e.isComposing || e.keyCode === 229) return;      // IME変換中のEnterは確定用。送信しない
+  if(e.ctrlKey || e.metaKey){ e.preventDefault(); send(); return; }
+  if(settings.enterSend && !e.shiftKey){ e.preventDefault(); send(); }
+});
+serverEl.onchange = () => { settings.server = serverEl.value; save(LS.settings, settings); loadModels(); };
+modelEl.onchange = () => { settings.model = modelEl.value; save(LS.settings, settings); };
+tempEl.oninput = () => { tempValEl.textContent = parseFloat(tempEl.value).toFixed(1); settings.temp = parseFloat(tempEl.value); save(LS.settings, settings); };
+thinkEl.onchange = () => { settings.think = thinkEl.checked; save(LS.settings, settings); };
+$("autoTitle").onchange = (e) => { settings.autoTitle = e.target.checked; save(LS.settings, settings); };
+$("enterSend").onchange = (e) => { settings.enterSend = e.target.checked; save(LS.settings, settings); syncEnterHint(); };
+$("thinkTimeout").onchange = (e) => {
+  const v = Math.max(0, Math.min(600, parseInt(e.target.value, 10) || 0));
+  settings.thinkTimeout = v; e.target.value = v; save(LS.settings, settings);
+};
+
+// ===== 旧ローカル履歴のサーバー移行（初回1回だけ） =====
+async function migrateLocal(){
+  if(localStorage.getItem(LS.migrated)) return;
+  const old = load(LS.convs, []);
+  for(const c of (old || [])){
+    if(!c || !Array.isArray(c.messages) || !c.messages.length) continue;
+    try{
+      await fetch("/chats/api/save", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ id: c.id, title: c.title || "新しいチャット", messages: c.messages }),
+      });
+    }catch(e){}
+  }
+  save(LS.migrated, 1);   // 旧データは消さず残したまま、再アップロードだけ防ぐ
+}
+
+// ===== 初期化 =====
+// このページと同一オリジンを使う。/api はサーバー(chat-server.js)がOllamaへ中継するため、
+// http/https どちらでも・混在コンテンツやCORSなしで動作する。
+serverEl.value = settings.server && /:11434/.test(settings.server) ? location.origin : (settings.server || location.origin);
+systemEl.value = settings.system || "";
+tempEl.value = settings.temp ?? 0.8; tempValEl.textContent = parseFloat(tempEl.value).toFixed(1);
+thinkEl.checked = !!settings.think;
+$("autoTitle").checked = !!settings.autoTitle;
+$("enterSend").checked = !!settings.enterSend;
+$("thinkTimeout").value = settings.thinkTimeout;
+syncEnterHint();
+systemEl.oninput = () => { settings.system = systemEl.value; save(LS.settings, settings); };
+renderPersonas();
+(async function init(){
+  await migrateLocal();
+  await loadList();
+  if(curId && convList.find(c => c.id === curId)) await openConv(curId);
+  else if(convList.length) await openConv(convList[0].id);
+  else newConv();
+})();
+loadModels();
+focusInput();
+</script>
+</body>
+</html>

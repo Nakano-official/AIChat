@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="aichat">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="授業サマリ" />
+<meta name="theme-color" content="#0f1117" />
+<title>授業サマリ</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body class="bg-base-100 text-base-content h-dvh overflow-hidden">
+<div class="drawer md:drawer-open h-dvh">
+  <input id="drawer-toggle" type="checkbox" class="drawer-toggle" />
+
+  <!-- ===== メイン ===== -->
+  <div class="drawer-content flex flex-col h-dvh min-w-0">
+    <header class="navbar min-h-0 flex-wrap gap-1.5 bg-base-200 border-b border-base-300 px-2 sm:px-3 py-2"
+            style="padding-top: calc(0.5rem + env(safe-area-inset-top));">
+      <label for="drawer-toggle" class="btn btn-ghost btn-square btn-sm md:hidden" aria-label="一覧">☰</label>
+      <h1 class="text-base font-semibold whitespace-nowrap mr-1">📚<span class="hidden sm:inline"> 授業サマリ</span></h1>
+      <select id="model" class="select select-bordered select-sm flex-1 min-w-0 sm:flex-none sm:w-44"><option>読み込み中...</option></select>
+      <a href="/" class="btn btn-ghost btn-sm px-2 whitespace-nowrap" title="チャット">💬<span class="hidden sm:inline ml-1">チャット</span></a>
+      <span id="status" class="text-xs opacity-70 whitespace-nowrap ml-auto basis-full text-right sm:basis-auto">　</span>
+    </header>
+
+    <main id="content" class="flex-1 overflow-y-auto p-4 space-y-4">
+      <!-- メタ情報 -->
+      <div class="flex flex-wrap gap-3">
+        <div class="flex flex-col gap-1">
+          <label class="text-xs opacity-70">科目</label>
+          <input id="subject" type="text" class="input input-bordered input-sm w-40" placeholder="例：経済学" list="subjectList" />
+          <datalist id="subjectList"></datalist>
+        </div>
+        <div class="flex flex-col gap-1 flex-1 min-w-40">
+          <label class="text-xs opacity-70">タイトル</label>
+          <input id="title" type="text" class="input input-bordered input-sm w-full" placeholder="例：第5回 需要と供給" />
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-xs opacity-70">日付</label>
+          <input id="date" type="date" class="input input-bordered input-sm" />
+        </div>
+      </div>
+
+      <!-- 入力カード -->
+      <div class="card bg-base-200 border border-base-300">
+        <div class="card-body gap-3 p-4">
+          <div class="flex justify-between items-center gap-2">
+            <h2 id="sourceLabel" class="text-sm font-semibold opacity-80">授業テキストを貼り付け</h2>
+            <label class="btn btn-outline btn-sm cursor-pointer whitespace-nowrap">📄 ファイル/PDF/画像
+              <input id="file" type="file" accept=".txt,.md,.csv,.text,.log,.pdf,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,.gif,text/*,application/pdf,image/*" multiple hidden></label>
+          </div>
+          <textarea id="source" class="textarea textarea-bordered w-full min-h-44 max-h-[45vh] text-base leading-relaxed"
+            placeholder="授業のメモ・文字起こし・板書テキストなどをここに貼り付け、またはテキストファイルをドラッグ＆ドロップ／「📄 ファイル読込」で追加できます。長文でも自動で分割して要約します。"></textarea>
+          <div class="flex flex-wrap gap-2 items-center">
+            <span id="styleWrap" class="flex gap-2 items-center">
+              <label class="text-xs opacity-70">スタイル</label>
+              <select id="style" class="select select-bordered select-sm">
+                <option value="exam">試験対策（要点＋用語＋想定問題）</option>
+                <option value="brief">要点だけ（簡潔）</option>
+                <option value="detail">詳細まとめ</option>
+              </select>
+            </span>
+            <span class="flex-1"></span>
+            <button id="summarize" class="btn btn-primary btn-sm">✨ 要約する</button>
+            <button id="save" class="btn btn-outline btn-sm">💾 保存</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 要約カード -->
+      <div class="card bg-base-200 border border-base-300 hidden" id="summaryPanel">
+        <div class="card-body gap-3 p-4">
+          <div class="flex justify-between items-center">
+            <h2 class="text-sm font-semibold opacity-80">要約</h2>
+            <div class="flex gap-2">
+              <button id="dl" class="btn btn-ghost btn-xs">⬇ .md</button>
+              <button id="copy" class="btn btn-ghost btn-xs">コピー</button>
+            </div>
+          </div>
+          <div id="summary" class="md"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ===== サイドバー ===== -->
+  <div class="drawer-side z-20">
+    <label for="drawer-toggle" class="drawer-overlay"></label>
+    <aside class="flex flex-col w-72 h-dvh bg-base-200 border-r border-base-300">
+      <div class="flex gap-2 p-3">
+        <button id="newnote" class="btn btn-primary btn-sm flex-1">＋ 授業ノート</button>
+        <button id="newmemo" class="btn btn-outline btn-sm">📝 メモ</button>
+      </div>
+      <ul id="notelist" class="flex-1 overflow-y-auto px-2 pb-3"></ul>
+    </aside>
+  </div>
+</div>
+
+<script src="/shared.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const subjectEl=$("subject"), titleEl=$("title"), dateEl=$("date"), sourceEl=$("source"),
+      styleEl=$("style"), modelEl=$("model"), summaryEl=$("summary"), summaryPanel=$("summaryPanel"),
+      statusEl=$("status");
+
+let curId = null;          // 編集中ノートのID（null=新規）
+let curType = "note";      // "note"=授業ノート / "memo"=クイックメモ
+let currentSummary = "";   // 要約のMarkdown原文
+let busy = false;
+let memoTimer = null;      // メモの自動保存タイマー
+const MODEL_KEY = "notes_model";
+
+// escapeHtml・inline・renderMarkdown・copyText は shared.js から提供される
+function setStatus(t, cls=""){
+  statusEl.textContent=t;
+  statusEl.className = "text-xs whitespace-nowrap ml-auto basis-full text-right sm:basis-auto " +
+    (cls==="ok" ? "text-success" : cls==="err" ? "text-error" : "opacity-70");
+}
+
+// ===== モデル一覧 =====
+async function loadModels(){
+  try{
+    const r = await fetch("/api/tags"); if(!r.ok) throw new Error("HTTP "+r.status);
+    const names = ((await r.json()).models||[]).map(m=>m.name);
+    if(!names.length){ modelEl.innerHTML="<option>モデルなし</option>"; return; }
+    modelEl.innerHTML = names.map(n=>`<option>${escapeHtml(n)}</option>`).join("");
+    const saved = localStorage.getItem(MODEL_KEY);
+    if(saved && names.includes(saved)) modelEl.value = saved;
+  }catch(e){ modelEl.innerHTML="<option>接続失敗</option>"; setStatus("Ollamaに接続できません","err"); }
+}
+modelEl.onchange = () => localStorage.setItem(MODEL_KEY, modelEl.value);
+
+// ===== 長文分割（map-reduce用） =====
+function splitText(text, maxLen){
+  if(text.length <= maxLen) return [text];
+  const chunks=[]; let i=0;
+  while(i < text.length){
+    let end = Math.min(i+maxLen, text.length);
+    if(end < text.length){
+      const nl = text.lastIndexOf("\n", end);
+      if(nl > i + maxLen*0.5) end = nl; // 後半に改行があればそこで区切る
+    }
+    chunks.push(text.slice(i, end)); i = end;
+  }
+  return chunks;
+}
+function mapPrompt(chunk){
+  return `以下は大学の授業テキストの一部です。後で全体をまとめるために、重要な要点・用語・結論を漏れなく日本語の箇条書きで抽出してください。前置きや感想は不要、箇条書きのみ出力してください。\n\n---\n${chunk}\n---`;
+}
+function finalPrompt(text, style){
+  const head = "あなたは優秀な大学の学習アシスタントです。以下の授業内容を日本語で、Markdown（見出し・箇条書き）を使って読みやすくまとめてください。";
+  let spec;
+  if(style==="exam"){
+    spec = "次の構成でまとめてください:\n## 📌 要点\n（重要ポイントを箇条書き）\n## 🔑 重要用語\n（「用語：簡潔な説明」の形式で）\n## ❓ 想定問題\n（試験に出そうな問題を3〜5問、各問の下に答えも）\n## 🧠 一言まとめ\n（全体を1〜2文で）";
+  } else if(style==="brief"){
+    spec = "要点だけを簡潔に、箇条書き5〜8項目でまとめてください。見出しや前置きは不要、箇条書きのみ出力してください。";
+  } else {
+    spec = "次の構成でまとめてください:\n## 概要\n## 詳しい要点\n（テーマごとに見出し＋箇条書き）\n## 🔑 重要用語\n## 🧠 まとめ";
+  }
+  return `${head}\n\n${spec}\n\n--- 授業内容 ---\n${text}\n--- ここまで ---`;
+}
+
+// ===== Ollama生成（/api/generate ストリーミング） =====
+async function generate(prompt, onToken){
+  const r = await fetch("/api/generate", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    // think:false は必須。qwen3.5 系は思考ONが既定で、要約のような長い課題では
+    // 思考が終わらず本文が返らないことがある（非対応モデルに送っても無害）
+    body: JSON.stringify({ model: modelEl.value, prompt, stream:true, think:false, options:{ temperature:0.3, num_ctx:8192 } }),
+  });
+  if(!r.ok) throw new Error("HTTP "+r.status+" "+(await r.text()));
+  const reader=r.body.getReader(); const dec=new TextDecoder(); let buf=""; let full="";
+  while(true){
+    const {done,value}=await reader.read(); if(done) break;
+    buf+=dec.decode(value,{stream:true});
+    const lines=buf.split("\n"); buf=lines.pop();
+    for(const line of lines){
+      if(!line.trim()) continue;
+      let o; try{ o = JSON.parse(line); }catch(_){ continue; } // 不正な行はスキップ
+      if(o.error) throw new Error(o.error);
+      if(o.response){ full+=o.response; if(onToken) onToken(full); }
+    }
+  }
+  return full;
+}
+
+async function summarize(){
+  const text = sourceEl.value.trim();
+  if(!text){ alert("授業テキストを貼り付けてください。"); return; }
+  if(busy) return;
+  busy = true; $("summarize").disabled = true; $("save").disabled = true;
+  summaryPanel.classList.remove("hidden"); summaryEl.classList.add("cursor"); summaryEl.innerHTML = "";
+  try{
+    // map段: 長文はチャンク要約。結合後がまだ長ければ、収まるまで繰り返し圧縮する
+    // （チャンク数が多いと1回の結合では num_ctx を超えうるため）
+    let combined = text;
+    let round = 0;
+    while(combined.length > 6000){
+      const chunks = splitText(combined, 6000);
+      if(chunks.length <= 1) break;            // これ以上分割できない（巨大な1行など）
+      round++;
+      const parts = [];
+      for(let i=0;i<chunks.length;i++){
+        setStatus(round > 1 ? `要約を圧縮中(${round}回目)... ${i+1}/${chunks.length}` : `要約中... 部分 ${i+1}/${chunks.length}`);
+        parts.push(await generate(mapPrompt(chunks[i]), null));
+      }
+      combined = parts.join("\n\n");
+    }
+    setStatus("まとめを生成中...");
+    let full = "";
+    full = await generate(finalPrompt(combined, styleEl.value), (cur)=>{
+      full = cur; summaryEl.innerHTML = renderMarkdown(cur); $("content").scrollTop = $("content").scrollHeight;
+    });
+    currentSummary = full;
+    summaryEl.innerHTML = renderMarkdown(full);
+    setStatus("自動保存中...");
+    await saveNote(true);       // 要約できたら自動保存（紛失防止）
+    setStatus("完了・保存しました","ok");
+  }catch(e){
+    summaryEl.innerHTML = `<p class="text-error">⚠️ エラー: ${escapeHtml(e.message)}</p>`;
+    setStatus("エラー","err");
+  }finally{
+    busy = false; $("summarize").disabled = false; $("save").disabled = false;
+    summaryEl.classList.remove("cursor");
+  }
+}
+
+// 要約内のコードブロックのコピーボタン（イベント委譲）
+summaryEl.addEventListener("click", (e) => {
+  const cb = e.target.closest(".copybtn");
+  if(cb && cb.dataset.code){
+    const code = document.getElementById(cb.dataset.code);
+    if(code){ copyText(code.textContent); cb.textContent="コピー済"; setTimeout(()=>cb.textContent="コピー",1200); }
+  }
+});
+
+// ===== ノート保存API =====
+async function refreshList(){
+  try{
+    const list = await (await fetch("/notes/api/list")).json();
+    const box = $("notelist"); box.innerHTML = "";
+    if(!list.length){ box.innerHTML = '<li class="text-center text-xs opacity-50 py-6">まだノートがありません</li>'; return; }
+    // 科目候補（オートコンプリート）を更新
+    const subjects = [...new Set(list.filter(n=>n.type!=="memo" && n.subject).map(n=>n.subject))].sort((a,b)=>a.localeCompare(b,"ja"));
+    $("subjectList").innerHTML = subjects.map(s=>`<option value="${escapeHtml(s)}">`).join("");
+    // 科目（授業）ごと・メモはまとめてグループ化
+    const groups = {};
+    list.forEach(n => {
+      const g = n.type==="memo" ? "📝 メモ" : (n.subject || "（科目なし）");
+      (groups[g] = groups[g] || []).push(n);
+    });
+    const rank = x => x==="📝 メモ" ? 2 : x==="（科目なし）" ? 1 : 0; // 科目→未分類→メモの順
+    Object.keys(groups).sort((a,b)=> rank(a)-rank(b) || a.localeCompare(b,"ja")).forEach(g => {
+      const hdr = document.createElement("li");
+      hdr.className = "px-3 pt-3 pb-1 text-xs font-bold opacity-50 tracking-wide";
+      hdr.textContent = g;
+      box.appendChild(hdr);
+      groups[g].forEach(n => {
+        const li = document.createElement("li");
+        const row = document.createElement("div");
+        row.className = "group flex items-center gap-1 rounded-lg px-3 py-2 cursor-pointer transition-colors "
+          + (n.id===curId ? "bg-primary/15" : "hover:bg-base-300/70");
+        row.onclick = () => openNote(n.id);
+        const meta = document.createElement("div");
+        meta.className = "flex-1 min-w-0";
+        const t = document.createElement("div"); t.className = "text-sm truncate"; t.textContent = n.title || "（無題）";
+        const s = document.createElement("div"); s.className = "text-xs opacity-50 truncate"; s.textContent = n.date || "";
+        meta.appendChild(t); meta.appendChild(s);
+        const del = document.createElement("button");
+        del.className = "btn btn-ghost btn-xs btn-square opacity-0 group-hover:opacity-100 text-base-content/50 hover:text-error";
+        del.textContent = "🗑";
+        del.onclick = (e) => { e.stopPropagation(); delNote(n.id); };
+        row.appendChild(meta); row.appendChild(del);
+        li.appendChild(row); box.appendChild(li);
+      });
+    });
+  }catch(e){ setStatus("一覧の取得に失敗","err"); }
+}
+async function openNote(id){
+  try{
+    const n = await (await fetch("/notes/api/get?id="+encodeURIComponent(id))).json();
+    curId = n.id; curType = n.type || "note";
+    subjectEl.value = n.subject||""; titleEl.value = n.title||""; dateEl.value = n.date||"";
+    sourceEl.value = n.source||""; currentSummary = n.summary||"";
+    applyMode();
+    if(curType!=="memo" && currentSummary){ summaryPanel.classList.remove("hidden"); summaryEl.innerHTML = renderMarkdown(currentSummary); }
+    else { summaryPanel.classList.add("hidden"); summaryEl.innerHTML=""; }
+    setStatus(""); refreshList(); closeDrawer();
+    $("content").scrollTop = 0;
+  }catch(e){ setStatus("読み込み失敗","err"); }
+}
+async function saveNote(silent){
+  if(!sourceEl.value.trim() && !currentSummary){ if(!silent) alert("保存する内容がありません。"); return; }
+  let title = titleEl.value.trim();
+  if(!title){
+    title = curType==="memo"
+      ? ((sourceEl.value.trim().split("\n")[0]||"").slice(0,30) || "メモ")  // メモは1行目をタイトルに
+      : (subjectEl.value.trim() || "無題");
+  }
+  const payload = {
+    id: curId, type: curType, subject: subjectEl.value.trim(),
+    title, date: dateEl.value, source: sourceEl.value, summary: currentSummary,
+  };
+  const saved = await (await fetch("/notes/api/save", {
+    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload),
+  })).json();
+  curId = saved.id;
+  await refreshList();
+  if(!silent) setStatus("保存しました","ok");
+}
+async function delNote(id){
+  if(!confirm("このノートを削除しますか？")) return;
+  await fetch("/notes/api/delete", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id}) });
+  if(curId===id) newNote();
+  refreshList();
+}
+function newNote(){
+  curId = null; curType = "note"; currentSummary = "";
+  subjectEl.value=""; titleEl.value=""; sourceEl.value="";
+  dateEl.value = new Date().toISOString().slice(0,10);
+  applyMode(); summaryPanel.classList.add("hidden"); summaryEl.innerHTML="";
+  setStatus(""); refreshList(); closeDrawer(); subjectEl.focus();
+}
+function newMemo(){
+  curId = null; curType = "memo"; currentSummary = "";
+  subjectEl.value=""; titleEl.value=""; sourceEl.value="";
+  dateEl.value = new Date().toISOString().slice(0,10);
+  applyMode(); setStatus(""); refreshList(); closeDrawer(); sourceEl.focus();
+}
+// メモ/授業ノートで画面の出し分け
+function applyMode(){
+  const memo = curType==="memo";
+  $("styleWrap").style.display = memo ? "none" : "flex";
+  $("summarize").style.display = memo ? "none" : "";
+  $("sourceLabel").textContent = memo ? "メモ" : "授業テキストを貼り付け";
+  sourceEl.placeholder = memo
+    ? "とっさのメモをここに。入力すると数秒後に自動保存されます。"
+    : "授業のメモ・文字起こし・板書テキストなどをここに貼り付け、またはテキストファイルをドラッグ＆ドロップ／「📄 ファイル読込」で追加できます。長文でも自動で分割して要約します。";
+  if(memo) summaryPanel.classList.add("hidden");
+}
+
+// ===== ファイル読み込み（テキストはそのまま / PDF・画像はサーバーでOCR・抽出）=====
+const TEXT_RE = /\.(txt|md|csv|log|text)$/i;
+const OCR_RE  = /\.(pdf|png|jpg|jpeg|webp|bmp|tif|tiff|gif)$/i;
+async function addFiles(fileList){
+  const files = [...fileList];
+  if(!files.length) return;
+  let added = "", okCount = 0;
+  for(const f of files){
+    try{
+      let text = "";
+      if(f.type.startsWith("text") || TEXT_RE.test(f.name)){
+        text = await f.text();                                   // テキストはブラウザ内で読む
+      } else if(OCR_RE.test(f.name) || f.type==="application/pdf" || f.type.startsWith("image/")){
+        setStatus(`${f.name} を読み取り中…（PDF/画像）`);          // サーバーで抽出/OCR
+        const r = await fetch("/notes/api/extract?name="+encodeURIComponent(f.name), { method:"POST", body: f });
+        const j = await r.json();
+        if(!r.ok || j.error) throw new Error(j.error || ("HTTP "+r.status));
+        text = j.text || "";
+        if(!text){ setStatus(`${f.name}: 文字を検出できませんでした`,"err"); continue; }
+      } else {
+        setStatus(`${f.name}: 非対応の形式です`,"err"); continue;
+      }
+      added += (files.length>1 ? `--- ${f.name} ---\n` : "") + text + "\n\n";
+      okCount++;
+    }catch(err){ setStatus(`${f.name} の読み取り失敗: ${err.message}`,"err"); }
+  }
+  if(!added.trim()) return;
+  const cur = sourceEl.value.trim();
+  sourceEl.value = cur ? cur + "\n\n" + added.trimEnd() : added.trimEnd();
+  if(!titleEl.value.trim()) titleEl.value = files[0].name.replace(/\.[^.]+$/,"");
+  setStatus(`${okCount}件のファイルを読み込みました`,"ok");
+}
+$("file").onchange = (e) => { addFiles(e.target.files); e.target.value=""; };
+sourceEl.addEventListener("dragover", (e) => { e.preventDefault(); sourceEl.classList.add("border-primary"); });
+sourceEl.addEventListener("dragleave", () => { sourceEl.classList.remove("border-primary"); });
+sourceEl.addEventListener("drop", (e) => {
+  sourceEl.classList.remove("border-primary");
+  if(e.dataTransfer.files && e.dataTransfer.files.length){ e.preventDefault(); addFiles(e.dataTransfer.files); }
+});
+
+// ===== UI =====
+function closeDrawer(){ const t = $("drawer-toggle"); if(t) t.checked = false; }   // モバイルのドロワーを閉じる
+$("newnote").onclick = newNote;
+$("newmemo").onclick = newMemo;
+$("summarize").onclick = summarize;
+// メモは入力が止まって1.2秒後に自動保存（とっさのメモを取りこぼさない）
+sourceEl.addEventListener("input", () => {
+  if(curType!=="memo") return;
+  clearTimeout(memoTimer);
+  memoTimer = setTimeout(() => { if(sourceEl.value.trim()){ saveNote(true); setStatus("自動保存しました","ok"); } }, 1200);
+});
+$("save").onclick = () => saveNote(false);
+$("copy").onclick = async () => { const ok = await copyText(currentSummary); $("copy").textContent = ok?"コピー済":"失敗"; setTimeout(()=>$("copy").textContent="コピー",1200); };
+$("dl").onclick = () => {
+  if(!currentSummary){ setStatus("要約がありません","err"); return; }
+  const title = titleEl.value.trim() || subjectEl.value.trim() || "要約";
+  const metaLine = [subjectEl.value.trim() && ("科目: "+subjectEl.value.trim()), dateEl.value && ("日付: "+dateEl.value)].filter(Boolean).join(" ・ ");
+  const md = `# ${title}\n` + (metaLine ? metaLine+"\n" : "") + "\n" + currentSummary + "\n";
+  const fname = (title + (dateEl.value ? "_"+dateEl.value : "")).replace(/[\\/:*?"<>|]/g,"_") + ".md";
+  const blob = new Blob([md], { type:"text/markdown;charset=utf-8" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = fname;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+};
+
+// ===== 初期化 =====
+dateEl.value = new Date().toISOString().slice(0,10);
+applyMode();
+loadModels();
+refreshList();
+</script>
+</body>
+</html>
