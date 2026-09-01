@@ -1,0 +1,72 @@
+# 見た目だけのデモを GitHub Pages に公開する。
+# src/ には手を入れず、demo/build.mjs が _site/ を組み立てる（絶対パスの相対化＋
+# fetch を差し替える demo.js の注入）。AIもデータも動かない、UIの見本。
+name: Deploy demo to Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'demo/**', 'tailwind.config.js', 'package.json', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 公開は1つずつ。進行中のデプロイは中断しない。
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # app.css は成果物としてコミット済みだが、CSSの再ビルド忘れに気づけるよう
+      # ここでも生成し直す（差分が出たら失敗させる）。
+      - run: npm ci
+      - run: npm run css
+      - name: app.css が最新か確認
+        run: |
+          if ! git diff --quiet -- src/app.css; then
+            echo "::error::src/app.css が古いです。ローカルで npm run css を実行してコミットしてください。"
+            git diff --stat -- src/app.css
+            exit 1
+          fi
+
+      - run: node demo/build.mjs
+
+      - name: 公開物の検査
+        run: |
+          test -f _site/index.html || { echo "::error::index.html がありません"; exit 1; }
+          test -f _site/notes.html || { echo "::error::notes.html がありません"; exit 1; }
+          # サーバーが要る絶対パスが残っていたらサブパス配信で壊れる
+          if grep -qE '(href|src)="/' _site/index.html _site/notes.html; then
+            echo "::error::絶対パスが残っています"; grep -nE '(href|src)="/' _site/*.html; exit 1
+          fi
+          # 個人情報や環境固有の情報が混入していないことを確認する
+          if grep -rniE 'tail[0-9a-f]{6}\.ts\.net|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|@icloud\.com|C:\\Users' _site/; then
+            echo "::error::公開物に個人情報らしき文字列が含まれています"; exit 1
+          fi
+          echo "検査OK"; ls -la _site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

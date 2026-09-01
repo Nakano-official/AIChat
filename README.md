@@ -8,6 +8,9 @@
 - 静的ページの配信と、Ollamaへの**許可リスト方式**のリバースプロキシを同一オリジンで行うため、CORSも混在コンテンツも発生しません
 - ブラウザ側もCDNを使わないので**オフラインで動作**します
 
+> [!NOTE]
+> **[デモページ](https://nakano-official.github.io/AIChat/)** で画面と操作だけ試せます。AIは動作せず、あらかじめ用意した文章を再生しています。
+
 ## 機能
 
 ### チャット (`/`)
@@ -150,6 +153,7 @@ ON/OFF型については、さらに**モデルがGPUに全部載っているか
 │  └─ tailwind-input.css   CSSのビルド元
 ├─ data/                   ノート・会話履歴・ログ（自動生成／リポジトリ対象外）
 ├─ tools/                  Poppler・Tesseractの言語データ（リポジトリ対象外）
+├─ demo/                   GitHub Pages 用デモのビルド（本体からは参照されません）
 ├─ tailwind.config.js
 ├─ package.json
 └─ チャット起動.cmd         Windows用の起動ショートカット
