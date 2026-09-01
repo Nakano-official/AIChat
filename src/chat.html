@@ -37,6 +37,7 @@
     <footer class="flex items-end gap-2 bg-base-200 border-t border-base-300 px-3 py-3"
             style="padding-bottom: calc(0.75rem + env(safe-area-inset-bottom));">
       <button id="mic" class="btn btn-ghost btn-square" title="音声入力">🎤</button>
+      <button id="webtoggle" class="btn btn-ghost btn-square" title="ウェブ検索（ONにすると発言を検索して結果を読みます）">🔍</button>
       <textarea id="input" rows="1"
         class="textarea textarea-bordered flex-1 min-w-0 resize-none min-h-12 max-h-44 text-base leading-relaxed"
         placeholder="メッセージ"></textarea>
@@ -578,6 +579,12 @@ async function send(){
   if(cur.title === "新しいチャット") cur.title = text.slice(0,24);
   refreshActions(); renderSidebar(); scrollDown(true);
   await saveCur();           // ユーザー発言を即サーバー保存（他端末からも見える）
+  // ウェブから資料を集める。画面には出さず、モデルへ渡す分だけ m に持たせる。
+  // 再生成しても同じ資料で答えられるよう履歴にも保存する。
+  try{
+    const ctx = await buildWebContext(text);
+    if(ctx){ m.web = ctx; await saveCur(); }
+  }catch(e){ webNote("⚠️ ウェブ取得に失敗: " + e.message, "text-warning"); }
   await generate();
 }
 async function regenerate(){
@@ -588,11 +595,94 @@ async function regenerate(){
   }
   await generate();
 }
+// ===== ウェブ検索 / URL読み込み ---------------------------------------------
+// このアプリで唯一、外部と通信する機能。何を外に出したかを必ず画面に出す。
+// 取り込んだ本文は user 発言の前に「資料」として足すだけで、履歴の形は変えない。
+const WEB_TOP_N    = 3;      // 検索結果から実際に読むページ数
+const WEB_MAX_PAGE = 2500;   // 1ページから取り込む文字数の上限
+const WEB_MAX_ALL  = 7000;   // 全体の上限（num_ctx 8192 を溢れさせないため）
+const URL_RE = /https?:\/\/[^\s<>"'）】」]+/g;
+
+let webMode = false;         // 🔍トグル。ONの時だけ検索する
+
+function webNote(text, cls){
+  const d = document.createElement("div");
+  d.className = "text-xs px-4 py-1 " + (cls || "opacity-60");
+  d.textContent = text;
+  chatEl.appendChild(d); scrollDown(false);
+  return d;
+}
+
+async function webSearch(query){
+  const r = await fetch(base()+"/web/api/search?q="+encodeURIComponent(query));
+  const j = await r.json();
+  if(!r.ok || j.error) throw new Error(j.error || ("HTTP "+r.status));
+  return j.results || [];
+}
+async function webFetch(url){
+  const r = await fetch(base()+"/web/api/fetch?url="+encodeURIComponent(url));
+  const j = await r.json();
+  if(!r.ok || j.error) throw new Error(j.error || ("HTTP "+r.status));
+  return j;
+}
+
+// 発言から資料ブロックを組み立てる。何も取れなければ空文字を返す。
+async function buildWebContext(text){
+  const urls = (text.match(URL_RE) || []).slice(0, 3);
+  const pages = [];
+
+  if(urls.length){                       // 本文にURLがあれば、検索せずそれを読む
+    const note = webNote("🔗 " + urls.length + "件のURLを読み込み中…");
+    for(const u of urls){
+      try{ const p = await webFetch(u); pages.push(p); }
+      catch(e){ webNote("⚠️ 読み込み失敗: " + u + " (" + e.message + ")", "text-warning"); }
+    }
+    note.remove();
+  } else if(webMode){                    // URLが無く検索ONなら、発言をそのまま検索語にする
+    const note = webNote("🔍 検索中: " + text.slice(0, 60));
+    let hits = [];
+    try{ hits = await webSearch(text); }
+    catch(e){ note.remove(); webNote("⚠️ 検索失敗: " + e.message, "text-warning"); return ""; }
+    note.remove();
+    if(!hits.length){ webNote("🔍 検索結果なし: " + text.slice(0, 60), "text-warning"); return ""; }
+    const list = webNote("🔍 「" + text.slice(0, 40) + "」を検索 → 上位" + Math.min(WEB_TOP_N, hits.length) + "件を読み込み中…");
+    for(const h of hits.slice(0, WEB_TOP_N)){
+      try{ const p = await webFetch(h.url); pages.push({ ...p, title: p.title || h.title }); }
+      catch(e){ /* 1件失敗しても続ける */ }
+    }
+    list.remove();
+  }
+  if(!pages.length) return "";
+
+  // 取り込んだ出典を画面に残す（あとから何を読んだか辿れるように）
+  const box = document.createElement("div");
+  box.className = "text-xs px-4 py-1 opacity-60 space-y-0.5";
+  box.appendChild(Object.assign(document.createElement("div"), { textContent: "📄 参照した資料" }));
+  for(const p of pages){
+    const a = document.createElement("a");
+    a.href = p.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+    a.className = "link link-hover block truncate";
+    a.textContent = "・" + (p.title || p.url);
+    box.appendChild(a);
+  }
+  chatEl.appendChild(box); scrollDown(false);
+
+  let out = "", used = 0;
+  for(const p of pages){
+    if(used >= WEB_MAX_ALL) break;
+    const body = p.text.slice(0, Math.min(WEB_MAX_PAGE, WEB_MAX_ALL - used));
+    used += body.length;
+    out += "\n\n--- 資料: " + (p.title || p.url) + "\nURL: " + p.url + "\n" + body;
+  }
+  return "以下はウェブから取得した資料です。これを踏まえて質問に答えてください。"
+       + "資料に書かれていないことは推測せず、分からないと答えてください。" + out + "\n\n--- 資料ここまで ---\n\n";
+}
+
 // opts.think     : 思考モードの明示指定（未指定なら設定トグルに従う）
 // opts.noTimeout : この回だけ思考タイムアウトを無効にする（「もう一度（思考ON）」用）
 async function generate(opts = {}){
   // 会話履歴は role/content だけ送る（thinking はモデルに渡さない）
-  const payload = cur.messages.map(m => ({ role: m.role, content: m.content }));
+  const payload = cur.messages.map(m => ({ role: m.role, content: (m.web || "") + m.content }));
   if(systemEl.value.trim()) payload.unshift({ role:"system", content:systemEl.value.trim() });
 
   // 前回のエラー表示・履歴に残さなかった吹き出しを片付ける
@@ -812,6 +902,17 @@ serverEl.onchange = () => { settings.server = serverEl.value; save(LS.settings, 
 modelEl.onchange = () => { settings.model = modelEl.value; save(LS.settings, settings); syncThinkUI(); };
 tempEl.oninput = () => { tempValEl.textContent = parseFloat(tempEl.value).toFixed(1); settings.temp = parseFloat(tempEl.value); save(LS.settings, settings); };
 thinkEl.onchange = () => { settings.think = thinkParam(); save(LS.settings, settings); };
+$("webtoggle").onclick = () => {
+  webMode = !webMode;
+  settings.web = webMode; save(LS.settings, settings);
+  syncWebToggle();
+};
+function syncWebToggle(){
+  const b = $("webtoggle");
+  b.classList.toggle("btn-ghost", !webMode);
+  b.classList.toggle("btn-primary", webMode);
+  b.title = webMode ? "ウェブ検索: ON（発言を検索して結果を読みます）" : "ウェブ検索: OFF（URLを貼った時だけ読み込みます）";
+}
 $("autoTitle").onchange = (e) => { settings.autoTitle = e.target.checked; save(LS.settings, settings); };
 $("enterSend").onchange = (e) => { settings.enterSend = e.target.checked; save(LS.settings, settings); syncEnterHint(); };
 $("thinkTimeout").onchange = (e) => {
@@ -844,6 +945,7 @@ tempEl.value = settings.temp ?? 0.8; tempValEl.textContent = parseFloat(tempEl.v
 $("autoTitle").checked = !!settings.autoTitle;
 $("enterSend").checked = !!settings.enterSend;
 $("thinkTimeout").value = settings.thinkTimeout;
+webMode = !!settings.web; syncWebToggle();
 syncEnterHint();
 systemEl.oninput = () => { settings.system = systemEl.value; save(LS.settings, settings); };
 renderPersonas();

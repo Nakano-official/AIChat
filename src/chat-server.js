@@ -3,9 +3,12 @@
 //  - "/notes"       → notes.html（授業サマリ）を配信
 //  - "/notes/api/*" → ノート保存API（<プロジェクトルート>/data/notes.json に保存）
 //  - "/api/*"        → Ollama(127.0.0.1:11434) へリバースプロキシ（許可リスト方式）
+//  - "/web/api/*"   → ウェブ検索(DuckDuckGo)とURL本文抽出。ここだけが唯一の外向き通信。
 // 画面もAPIも同一オリジンになるので、HTTPS化(tailscale serve)時の
 // 「混在コンテンツ」ブロックとCORSを完全に回避できる。
 const http = require("http");
+const https = require("https");
+const zlib = require("zlib");
 const fs = require("fs");
 const path = require("path");
 const { exec, execFile } = require("child_process");
@@ -178,6 +181,166 @@ function sendJson(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
+// ===== ウェブ検索 / URL読み込み =============================================
+// このアプリで唯一、外部へ出て行く経路。取りに行くだけで、ノートや会話は送らない。
+// 検索語は /web/api/search?q= に渡ったものがそのまま出るので、UI側で必ず見せること。
+const WEB_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const WEB_TIMEOUT = 15000;
+const WEB_MAX_BYTES = 3 * 1024 * 1024;   // 巨大ファイルを掴まされないための上限
+const WEB_MAX_REDIRECT = 4;
+
+// 社内/自宅LANやこのPC自身を踏ませない（SSRF対策）。
+// 名前解決後のIPまでは見ていないので、DNSリバインディングまでは防げない。
+function isBlockedHost(hostname) {
+  const h = String(hostname).toLowerCase().replace(/^\[|\]$/g, "");
+  if (!h || h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) return true;
+  if (h.includes(":")) return true;                       // IPv6リテラルは通さない
+  const m = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (m) {
+    const a = +m[1], b = +m[2];
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;              // link-local
+    if (a === 100 && b >= 64 && b <= 127) return true;    // CGNAT。Tailscale の 100.x もここ
+  }
+  return false;
+}
+
+function webGet(target, depth) {
+  depth = depth || 0;
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(target); } catch { return reject(new Error("URLが不正です")); }
+    if (u.protocol !== "http:" && u.protocol !== "https:") return reject(new Error("http/https のみ扱えます"));
+    if (isBlockedHost(u.hostname)) return reject(new Error("内部アドレスへのアクセスは許可されていません"));
+    const mod = u.protocol === "https:" ? https : http;
+    const req = mod.request({
+      hostname: u.hostname, port: u.port || undefined, path: (u.pathname || "/") + u.search, method: "GET",
+      headers: { "user-agent": WEB_UA, "accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+                 "accept-language": "ja,en;q=0.8", "accept-encoding": "gzip, deflate" },
+    }, (res) => {
+      const code = res.statusCode;
+      if (code >= 300 && code < 400 && res.headers.location) {
+        res.resume();
+        if (depth >= WEB_MAX_REDIRECT) return reject(new Error("リダイレクトが多すぎます"));
+        let next;
+        try { next = new URL(res.headers.location, u).href; } catch { return reject(new Error("リダイレクト先が不正です")); }
+        return resolve(webGet(next, depth + 1));
+      }
+      if (code !== 200) { res.resume(); return reject(new Error("取得できませんでした (HTTP " + code + ")")); }
+      const enc = String(res.headers["content-encoding"] || "").toLowerCase();
+      let stream = res;
+      if (enc === "gzip") stream = res.pipe(zlib.createGunzip());
+      else if (enc === "deflate") stream = res.pipe(zlib.createInflate());
+      const chunks = []; let size = 0, cut = false;
+      stream.on("data", (c) => {
+        if (cut) return;
+        size += c.length;
+        if (size > WEB_MAX_BYTES) { cut = true; req.destroy(); return; }   // 上限で打ち切り
+        chunks.push(c);
+      });
+      stream.on("end", () => resolve({ url: u.href, headers: res.headers, buf: Buffer.concat(chunks) }));
+      stream.on("error", (e) => (cut ? resolve({ url: u.href, headers: res.headers, buf: Buffer.concat(chunks) }) : reject(e)));
+    });
+    req.setTimeout(WEB_TIMEOUT, () => req.destroy(new Error("タイムアウトしました")));
+    req.on("error", (e) => reject(e));
+    req.end();
+  });
+}
+
+// 日本語サイトは今も Shift_JIS / EUC-JP が残っているので、宣言を見て復号する。
+function decodeBody(buf, headers) {
+  let label = (/charset=["']?([\w-]+)/i.exec(String(headers["content-type"] || "")) || [])[1];
+  if (!label) label = (/<meta[^>]+charset=["']?([\w-]+)/i.exec(buf.slice(0, 4096).toString("latin1")) || [])[1];
+  try { return new TextDecoder(String(label || "utf-8").toLowerCase()).decode(buf); }
+  catch { return buf.toString("utf8"); }
+}
+
+const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+function decodeEntities(s) {
+  return s.replace(/&(#x?[0-9a-f]+|\w+);/gi, (m, e) => {
+    if (e[0] === "#") {
+      const n = (e[1] === "x" || e[1] === "X") ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return (isFinite(n) && n > 0 && n <= 0x10ffff) ? String.fromCodePoint(n) : m;
+    }
+    const v = ENTITIES[e.toLowerCase()];
+    return v === undefined ? m : v;
+  });
+}
+
+// 本文らしいテキストだけ取り出す。Readability相当の厳密さは狙わず、
+// 「要約に投げられる程度に読める」ことを目標にした軽い実装。
+function htmlToText(html) {
+  let s = html.replace(/<!--[\s\S]*?-->/g, " ");
+  s = s.replace(/<(script|style|noscript|svg|canvas|iframe|template|form|nav|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " ");
+  s = s.replace(/<li\b[^>]*>/gi, "\n- ");
+  s = s.replace(/<br\s*\/?>/gi, "\n");
+  s = s.replace(/<h([1-6])\b[^>]*>/gi, (m, d) => "\n\n" + "#".repeat(+d) + " ");
+  s = s.replace(/<\/(p|div|h[1-6]|li|tr|section|article|blockquote|pre)>/gi, "\n");
+  s = s.replace(/<[^>]+>/g, " ");
+  s = decodeEntities(s);
+  return s.replace(/\r/g, "").replace(/[ \t\u00a0]+/g, " ")
+          .replace(/ *\n */g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function pageTitle(html) {
+  const t = (/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html) || [])[1]
+         || (/<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html) || [])[1] || "";
+  return decodeEntities(t.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+}
+
+// DuckDuckGo の HTML版。APIキー不要な代わりに、先方のHTML変更で壊れうる。
+// 壊れた時にここだけ差し替えられるよう、解析を1関数に閉じてある。
+function parseDuckDuckGo(html) {
+  const out = [];
+  const re = /<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) && out.length < 10) {
+    let href = decodeEntities(m[1]);
+    const u = /[?&]uddg=([^&]+)/.exec(href);        // 実URLは uddg= に包まれている
+    if (u) { try { href = decodeURIComponent(u[1]); } catch {} }
+    else if (href.startsWith("//")) href = "https:" + href;
+    if (!/^https?:\/\//i.test(href)) continue;
+    out.push({ title: decodeEntities(m[2].replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim(), url: href, snippet: "" });
+  }
+  const sre = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+  let i = 0, sm;
+  while ((sm = sre.exec(html)) && i < out.length) {
+    out[i++].snippet = decodeEntities(sm[1].replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
+  }
+  return out;
+}
+
+async function handleWebApi(req, res) {
+  const q = new URL(req.url, "http://x").searchParams;
+  const p = req.url.split("?")[0];
+  try {
+    if (p === "/web/api/search" && req.method === "GET") {
+      const query = (q.get("q") || "").trim();
+      if (!query) return sendJson(res, 400, { error: "検索語が空です" });
+      log(`  -> web search: ${query}`);          // 何を外に出したかログに残す
+      const r = await webGet("https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query));
+      const results = parseDuckDuckGo(decodeBody(r.buf, r.headers));
+      return sendJson(res, 200, { query, results });
+    }
+    if (p === "/web/api/fetch" && req.method === "GET") {
+      const target = (q.get("url") || "").trim();
+      if (!target) return sendJson(res, 400, { error: "URLが空です" });
+      log(`  -> web fetch: ${target}`);
+      const r = await webGet(target);
+      const ct = String(r.headers["content-type"] || "");
+      const body = decodeBody(r.buf, r.headers);
+      const isHtml = /html|xml/i.test(ct) || /^\s*<(!doctype|html)/i.test(body);
+      const text = isHtml ? htmlToText(body) : body;
+      return sendJson(res, 200, { url: r.url, title: isHtml ? pageTitle(body) : "", text, chars: text.length });
+    }
+    return sendJson(res, 404, { error: "unknown endpoint" });
+  } catch (e) {
+    return sendJson(res, 502, { error: e.message });
+  }
+}
+
 async function handleNotesApi(req, res) {
   const url = req.url.replace(/\?.*$/, "");
   try {
@@ -347,6 +510,7 @@ const server = http.createServer((req, res) => {
   }
   if (p.startsWith("/notes/api/")) return handleNotesApi(req, res);
   if (p.startsWith("/chats/api/")) return handleChatsApi(req, res);
+  if (p.startsWith("/web/api/")) return handleWebApi(req, res);
   if (p.startsWith("/api/")) {
     // 許可したエンドポイントのみOllamaへ中継（モデル削除/pull等の管理系は拒否）
     if (!PROXY_ALLOW.has(p)) { return sendJson(res, 403, { error: "このエンドポイントは許可されていません" }); }
