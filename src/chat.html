@@ -533,6 +533,14 @@ function thinkParam(){
   return v === "off" ? false : (v === "on" ? true : v);
 }
 
+// 選択中のモデルをサーバーに伝える。サーバーが動いている間だけ常駐が維持され、
+// 止まれば延長も止まって自然に降りる（初回メッセージのロード待ち約15秒を消すため）。
+function keepWarm(){
+  const m = modelEl.value;
+  if(!m || /^(モデルなし|接続失敗)$/.test(m)) return;
+  fetch(base()+"/warm/api/set?model="+encodeURIComponent(m)).catch(()=>{});
+}
+
 async function syncThinkUI(){
   const model = modelEl.value;
   thinkKind = await probeThink(model);
@@ -560,6 +568,7 @@ async function loadModels(){
     setStatus("接続OK","ok");
     await refreshGpuFit();
     await syncThinkUI();
+    keepWarm();
   }catch(e){ modelEl.innerHTML="<option>接続失敗</option>"; setStatus("接続できません: "+e.message,"err"); }
 }
 
@@ -946,7 +955,7 @@ inputEl.addEventListener("keydown", (e) => {
   if(settings.enterSend && !e.shiftKey){ e.preventDefault(); send(); }
 });
 serverEl.onchange = () => { settings.server = serverEl.value; save(LS.settings, settings); loadModels(); };
-modelEl.onchange = () => { settings.model = modelEl.value; save(LS.settings, settings); syncThinkUI(); };
+modelEl.onchange = () => { settings.model = modelEl.value; save(LS.settings, settings); syncThinkUI(); keepWarm(); };
 tempEl.oninput = () => { tempValEl.textContent = parseFloat(tempEl.value).toFixed(1); settings.temp = parseFloat(tempEl.value); save(LS.settings, settings); };
 thinkEl.onchange = () => { settings.think = thinkParam(); save(LS.settings, settings); };
 const WEB_MODES = ["off", "auto", "always"];

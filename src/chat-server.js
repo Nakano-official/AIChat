@@ -4,6 +4,7 @@
 //  - "/notes/api/*" → ノート保存API（<プロジェクトルート>/data/notes.json に保存）
 //  - "/api/*"        → Ollama(127.0.0.1:11434) へリバースプロキシ（許可リスト方式）
 //  - "/web/api/*"   → ウェブ検索(DuckDuckGo)とURL本文抽出。ここだけが唯一の外向き通信。
+//  - "/warm/api/set" → 選択中モデルをこのサーバーが動いている間だけ常駐させる
 // 画面もAPIも同一オリジンになるので、HTTPS化(tailscale serve)時の
 // 「混在コンテンツ」ブロックとCORSを完全に回避できる。
 const http = require("http");
@@ -179,6 +180,53 @@ function readBody(req, max = MAX_JSON) {
 function sendJson(res, code, obj) {
   res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(obj));
+}
+
+// ===== モデルの常駐（チャットサーバーが動いている間だけ） ====================
+// Ollama は Windows 起動時から常駐する別サービスなので、keep_alive:-1 を渡すと
+// チャットサーバーを止めてもモデルを抱えたままになる。そうならないよう、
+// 「短い保持時間を定期的に延長し続ける」方式にする。サーバーが止まれば延長も
+// 止まり、WARM_KEEP 経過後に Ollama 側で自然に降りる（強制終了されても同じ）。
+// 空プロンプトの /api/generate はロードだけして生成しない（実測: 0トークン、
+// ロード済みなら0.01秒）ので、延長のコストはほぼゼロ。
+const WARM_EVERY_MS = 4 * 60 * 1000;   // 延長の間隔
+const WARM_KEEP = "10m";               // 1回の延長で確保する時間（> WARM_EVERY_MS）
+let warmModel = null;
+
+function warmPing(model, keep) {
+  const data = Buffer.from(JSON.stringify({ model, prompt: "", stream: false, keep_alive: keep }));
+  const r = http.request({ ...OLLAMA, path: "/api/generate", method: "POST",
+    headers: { "content-type": "application/json", "content-length": data.length } }, (res) => res.resume());
+  r.setTimeout(120000, () => r.destroy());
+  r.on("error", () => {});               // Ollama停止中などは黙って諦める（次の周期で再試行）
+  r.end(data);
+}
+
+const warmTimer = setInterval(() => { if (warmModel) warmPing(warmModel, WARM_KEEP); }, WARM_EVERY_MS);
+warmTimer.unref();                       // このタイマーだけでプロセスを生かし続けない
+
+// 終了時は即座に降ろす（Ctrl+C など。ウィンドウを閉じた場合は拾えないが、
+// その時も延長が止まるので WARM_KEEP 後に自然に降りる）
+function releaseWarm() {
+  if (warmModel) { log(`モデルを解放: ${warmModel}`); warmPing(warmModel, 0); warmModel = null; }
+}
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(sig, () => { releaseWarm(); setTimeout(() => process.exit(0), 300); });
+}
+
+function handleWarmApi(req, res) {
+  if (req.url.split("?")[0] !== "/warm/api/set" || req.method !== "GET") {
+    return sendJson(res, 404, { error: "unknown endpoint" });
+  }
+  const model = (new URL(req.url, "http://x").searchParams.get("model") || "").trim();
+  if (!model) { releaseWarm(); return sendJson(res, 200, { warm: null }); }
+  if (model !== warmModel) {
+    if (warmModel) warmPing(warmModel, 0);   // 前のモデルは降ろす（6GB VRAMに2つは載らない）
+    warmModel = model;
+    log(`モデルを常駐: ${model}`);
+  }
+  warmPing(warmModel, WARM_KEEP);
+  return sendJson(res, 200, { warm: warmModel, keep: WARM_KEEP });
 }
 
 // ===== ウェブ検索 / URL読み込み =============================================
@@ -511,6 +559,7 @@ const server = http.createServer((req, res) => {
   if (p.startsWith("/notes/api/")) return handleNotesApi(req, res);
   if (p.startsWith("/chats/api/")) return handleChatsApi(req, res);
   if (p.startsWith("/web/api/")) return handleWebApi(req, res);
+  if (p.startsWith("/warm/api/")) return handleWarmApi(req, res);
   if (p.startsWith("/api/")) {
     // 許可したエンドポイントのみOllamaへ中継（モデル削除/pull等の管理系は拒否）
     if (!PROXY_ALLOW.has(p)) { return sendJson(res, 403, { error: "このエンドポイントは許可されていません" }); }
