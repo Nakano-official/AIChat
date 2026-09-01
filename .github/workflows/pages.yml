@@ -41,6 +41,13 @@ jobs:
             exit 1
           fi
 
+      # Pages の設定を取得し、未作成なら作る（enablement: true）。
+      # これがあると、リポジトリ設定 Settings > Pages を手で触らなくてよい。
+      - name: Pages を有効化
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - run: node demo/build.mjs
 
       - name: 公開物の検査
