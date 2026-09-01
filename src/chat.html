@@ -365,6 +365,12 @@ function attachActions(wrap, m, idx){
     setTimeout(() => b.textContent = "コピー", 1200);
   }));
   if(m.role === "user") foot.appendChild(mkBtn("✎ 編集", () => editMessage(idx)));
+  if(m.role === "assistant" && m.model){   // 記録前の古い履歴には無いので、その時は出さない
+    const tag = document.createElement("span");
+    tag.className = "text-xs opacity-40 ml-auto order-last";   // 再生成ボタンが後から入っても右端で固定
+    tag.textContent = m.model;
+    foot.appendChild(tag);
+  }
 }
 // 「再生成」は最後のAI発言にだけ出す。全再描画せずここで付け外しする。
 function refreshActions(){
@@ -598,6 +604,7 @@ async function generate(opts = {}){
 
   const useThink = opts.think !== undefined ? opts.think : thinkParam();
   const tmo = opts.noTimeout ? 0 : (settings.thinkTimeout || 0);
+  const useModel = modelEl.value;   // 生成中にUIで切り替えられても取り違えないよう固定する
 
   let full="", thought="", errMsg="", lastPaint=0, thinkMs=0;
   const t0 = performance.now();
@@ -615,7 +622,7 @@ async function generate(opts = {}){
 
   const post = (t) => fetch(base()+"/api/chat", {
     method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ model: modelEl.value, messages: payload, stream:true, think: t,
+    body: JSON.stringify({ model: useModel, messages: payload, stream:true, think: t,
                            options:{ temperature: parseFloat(tempEl.value), num_ctx: 8192 } }),
     signal: controller.signal,
   });
@@ -660,7 +667,8 @@ async function generate(opts = {}){
     refreshGpuFit().then(ch => { if(ch) syncThinkUI(); });
     if(full){
       // 中断・エラーでも、そこまで生成された内容は残して保存する
-      const m = { role:"assistant", content: full };
+      // どのモデルの出力かを残す。後から品質を比較・検証できるようにするため。
+      const m = { role:"assistant", content: full, model: useModel };
       if(thought){ m.thinking = thought; m.thinkMs = Math.round(thinkMs); }
       cur.messages.push(m);
       paintMessage(wrap, m, false);
