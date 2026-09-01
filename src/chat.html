@@ -136,6 +136,7 @@ const LS = {
   migrated: "ollama_chat_migrated",  // サーバー移行済みフラグ
   cur: "ollama_chat_cur",            // この端末で最後に開いた会話ID
   personas: "ollama_chat_personas", settings: "ollama_chat_settings",
+  gpuFit: "ollama_chat_gpufit",      // モデルがVRAMに全部載るか（/api/ps の実測を記憶）
 };
 const DEFAULT_PERSONAS = [
   { name: "デフォルト", prompt: "" },
@@ -450,22 +451,26 @@ function setStatus(t, cls=""){
   statusEl.className = "text-xs whitespace-nowrap ml-auto basis-full text-right sm:basis-auto " +
     (cls==="ok" ? "text-success" : cls==="err" ? "text-error" : "opacity-70");
 }
-// ---- モデルごとの思考能力を判定する ---------------------------------------
-// 実測(2026-09-01)で3モデル3様だったため、選べない選択肢はUIに出さない。
+// ---- 思考モードをモデルごとに出し分ける -----------------------------------
+// 【何を見るか】(1)モデルが thinking に対応しているか (2)このPCで待てる速度か。
+// どちらも実測で決める。モデル名は一切見ないので、新しいモデルにも追従する。
+//
+// (1) 能力: /api/show の capabilities と template から3型に分類する。
 //   "none"  : capabilities に thinking が無い。think を送ると400 (llama3.1:8b)
 //   "bool"  : ON/OFF のみ意味がある。low/medium/high は送っても差が出ない (qwen3.5)
 //   "level" : レベル制。think:false を送っても思考をやめないので OFF は出さない (gpt-oss:20b)
-// レベル制かどうかは、テンプレートが {{ .ThinkLevel }} を参照しているかで見分ける。
+//   レベル制かどうかは、テンプレートが {{ .ThinkLevel }} を参照しているかで見分ける。
 //
-// 【UIに出すのは "level" だけ】"bool" は動くが、このPC(RTX 2060 6GB)では実用にならない。
-// 実測(2026-09-01, qwen3.5:9b, 45%CPU/55%GPU): 雑談レベルの質問でも思考4000字・回答開始まで
-// 134秒、要約では199秒。thinkTimeout(既定60秒)が必ず作動して回答に辿り着かない。
-// レベル制(gpt-oss)はMoEで思考量そのものを絞れる("低"で思考9〜32字)ため実用範囲に入る。
-// 速いGPUに載せ替えたらここに "bool" を足すだけで元に戻せる。
+// (2) 速度: bool型はGPUに全部載るかで実用性が変わる。実測(2026-09-01):
+//     qwen3.5:4b (3.1GB, 100% GPU)  雑談17秒 / 要約31秒で回答開始 -> 実用
+//     qwen3.5:9b (6.1GB, 43%CPU分割) 雑談134秒 / 要約199秒        -> thinkTimeout が必ず作動
+//   CPUに溢れた瞬間に一桁遅くなるので、/api/ps の size_vram/size で判定して隠す。
+//   level型(MoE)は思考量そのものを絞れるため、この判定は適用しない。
 const thinkCaps = {};          // { model: "none"|"bool"|"level" } 一度引いたらキャッシュ
 let thinkKind = "bool";        // 現在選択中のモデルの型
+let thinkVisible = false;      // いま思考UIを出しているか
+let gpuFit = load(LS.gpuFit, {});   // { model: true|false } 一度動かせば分かるので覚えておく
 const THINK_LEVELS = [["low","低（速い）"],["medium","中"],["high","高（じっくり）"]];
-const THINK_SHOW = new Set(["level"]);   // 思考UIを出す型（上のコメント参照）
 
 async function probeThink(model){
   if(!model) return "bool";
@@ -484,29 +489,57 @@ async function probeThink(model){
   return kind;
 }
 
-// 保存してある好み(settings.think)を、そのモデルで実際に意味のある値へ写像する
+// ロード中のモデルの実配置を /api/ps から取り込む。変化があれば true。
+async function refreshGpuFit(){
+  try{
+    const r = await fetch(base()+"/api/ps");
+    if(!r.ok) return false;
+    let changed = false;
+    for(const m of (await r.json()).models || []){
+      if(!m.size) continue;
+      const fit = m.size_vram >= m.size;      // 完全にVRAM上なら true
+      if(gpuFit[m.name] !== fit){ gpuFit[m.name] = fit; changed = true; }
+    }
+    if(changed) save(LS.gpuFit, gpuFit);
+    return changed;
+  }catch{ return false; }
+}
+
+// 思考UIを出すか。bool型は「GPUに載る」と分かっている時だけ。
+// 未計測(undefined)のうちは出しておく（一度動かせば確定し、それまでは thinkTimeout が保険）。
+function thinkShown(kind, model){
+  if(kind === "none") return false;
+  if(kind === "level") return true;
+  return gpuFit[model] !== false;
+}
+
+// 保存してある好み(settings.think)を、そのモデルで意味のある値へ写像する
 function thinkFor(kind, pref){
-  if(!THINK_SHOW.has(kind)) return false;   // 出さない型は常に思考させない
-  return pref === true ? "medium" : (pref === false ? "low" : pref);
+  if(kind === "level") return pref === true ? "medium" : (pref === false ? "low" : pref);
+  return pref !== false;
 }
 
 // いま選ばれている値を /api/chat の think パラメータに変換
 function thinkParam(){
-  if(!THINK_SHOW.has(thinkKind)) return false;
-  return thinkEl.value || "low";
+  if(!thinkVisible) return false;
+  const v = thinkEl.value;
+  return v === "off" ? false : (v === "on" ? true : v);
 }
 
 async function syncThinkUI(){
-  thinkKind = await probeThink(modelEl.value);
+  const model = modelEl.value;
+  thinkKind = await probeThink(model);
+  thinkVisible = thinkShown(thinkKind, model);
   const box = $("thinkBox"), note = $("thinkNote");
-  if(!THINK_SHOW.has(thinkKind)){   // 非対応 or このPCでは実用にならない型は、トグルごと隠す
-    box.classList.add("hidden");
-    return;
-  }
+  if(!thinkVisible){ box.classList.add("hidden"); return; }
   box.classList.remove("hidden");
-  thinkEl.innerHTML = THINK_LEVELS.map(([v,l])=>`<option value="${v}">${escapeHtml(l)}</option>`).join("");
-  thinkEl.value = thinkFor(thinkKind, settings.think);
-  note.textContent = "このモデルは思考を完全にOFFにできません（OFFを指定しても考えます）。最小は「低」です。";
+  const opts = thinkKind === "level" ? THINK_LEVELS : [["off","OFF"],["on","ON"]];
+  thinkEl.innerHTML = opts.map(([v,l])=>`<option value="${v}">${escapeHtml(l)}</option>`).join("");
+  const pref = thinkFor(thinkKind, settings.think);
+  thinkEl.value = thinkKind === "level" ? pref : (pref ? "on" : "off");
+  note.textContent = thinkKind === "level"
+    ? "このモデルは思考を完全にOFFにできません（OFFを指定しても考えます）。最小は「低」です。"
+    : "答える前に考えます。精度が上がることもありますが大幅に遅くなり、複雑な質問では考え続けて答えが返らないことがあります。";
 }
 
 async function loadModels(){
@@ -518,6 +551,7 @@ async function loadModels(){
     modelEl.innerHTML = names.map(n=>`<option>${escapeHtml(n)}</option>`).join("");
     if(settings.model && names.includes(settings.model)) modelEl.value = settings.model;
     setStatus("接続OK","ok");
+    await refreshGpuFit();
     await syncThinkUI();
   }catch(e){ modelEl.innerHTML="<option>接続失敗</option>"; setStatus("接続できません: "+e.message,"err"); }
 }
@@ -621,6 +655,9 @@ async function generate(opts = {}){
     if(e.name !== "AbortError"){ errMsg = e.message; setStatus("エラー","err"); }
   }finally{
     clearTimer(); controller = null; setBusy(false);
+    // 生成直後はモデルが必ずロードされているので、実配置(GPU/CPU)を確定させる。
+    // 判定が変わったら思考UIを出し直す（例: 9bで初回に出ていたトグルがここで消える）。
+    refreshGpuFit().then(ch => { if(ch) syncThinkUI(); });
     if(full){
       // 中断・エラーでも、そこまで生成された内容は残して保存する
       const m = { role:"assistant", content: full };
@@ -650,7 +687,7 @@ async function generate(opts = {}){
       wrap._foot.appendChild(s);
       // やり直しはユーザーに選ばせる。勝手に再送信はしない。
       // 押しても状況が変わらない選択肢は出さない（思考をOFFにできないモデルの「OFFで再実行」等）。
-      if(THINK_SHOW.has(thinkKind)){
+      if(thinkKind === "level"){
         if(useThink !== "low"){
           const lo = mkBtn("思考「低」で再実行", () => { if(!controller) generate({ think:"low" }); });
           lo.className = "btn btn-primary btn-xs";
@@ -658,7 +695,12 @@ async function generate(opts = {}){
         }
         const again = mkBtn("もう一度（時間制限なし）", () => { if(!controller) generate({ think: useThink, noTimeout:true }); });
         wrap._foot.appendChild(again);
-      } else {   // 思考は使わない型。やり直しの選択肢は1つだけ
+      } else if(thinkVisible){
+        const off = mkBtn("思考OFFで再実行", () => { if(!controller) generate({ think:false }); });
+        off.className = "btn btn-primary btn-xs";
+        const on = mkBtn("もう一度（思考ON）", () => { if(!controller) generate({ think:true, noTimeout:true }); });
+        wrap._foot.append(off, on);
+      } else {   // 思考を使わないモデル。選択肢は1つだけ
         const again = mkBtn("もう一度", () => { if(!controller) generate({ think:false }); });
         again.className = "btn btn-primary btn-xs";
         wrap._foot.appendChild(again);
