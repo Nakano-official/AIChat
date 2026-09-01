@@ -47,7 +47,7 @@
       source: "（デモ用のサンプルです。実際はここに授業の書き起こしが入ります）",
       summary: "### 要点\n\n- **ACID特性** — 原子性・一貫性・独立性・耐久性\n- **分離レベル** — READ UNCOMMITTED から SERIALIZABLE までの4段階\n- **MVCC** — 更新のたびに版を作り、読み手が書き手を待たない",
       updatedAt: Date.now() - 6048e5 },
-    { id: "n2", type: "memo", title: "レポート締切", source: "レポート締切\n再来週の講義開始時まで。2000字程度。", updatedAt: Date.now() - 3600e3 },
+    { id: "n2", type: "memo", title: "次回の予習範囲", source: "次回の予習範囲\n・教科書 第9章（分散トランザクション）\n・二相コミットの図を見直す", updatedAt: Date.now() - 3600e3 },
   ];
 
   const clone = (o) => JSON.parse(JSON.stringify(o));
