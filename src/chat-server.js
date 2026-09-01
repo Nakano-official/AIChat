@@ -15,7 +15,8 @@ const OLLAMA = { host: "127.0.0.1", port: 11434 };
 const MAX_UPLOAD = 48 * 1024 * 1024; // ファイル抽出(PDF/画像)の最大受信サイズ
 const MAX_JSON   = 8 * 1024 * 1024;  // ノートJSON APIの最大受信サイズ
 // Ollamaへ中継してよいパス（破壊的/管理系エンドポイントは通さない）
-const PROXY_ALLOW = new Set(["/api/tags", "/api/version", "/api/chat", "/api/generate", "/api/embeddings"]);
+// /api/show はモデルの能力(thinking対応の有無/レベル制か)を読むだけの参照系。
+const PROXY_ALLOW = new Set(["/api/tags", "/api/version", "/api/show", "/api/chat", "/api/generate", "/api/embeddings"]);
 // このファイルは src/ 配下にあるので、ブラウザ配信物は同階層、
 // data/ と tools/ は1つ上（プロジェクトルート）を見る。
 const ROOT = path.join(__dirname, "..");

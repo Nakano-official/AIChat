@@ -85,12 +85,10 @@
           <span id="tempVal" class="tabular-nums w-9 text-right">0.8</span>
         </div>
       </div>
-      <div>
-        <label class="flex items-center gap-3 cursor-pointer">
-          <input id="think" type="checkbox" class="toggle toggle-primary toggle-sm" />
-          <span class="text-xs opacity-70">思考モード（qwen3.5 等のみ）</span>
-        </label>
-        <p class="text-xs opacity-50 mt-1">答える前に考えます。精度が上がることもありますが大幅に遅くなり、複雑な質問では考え続けて答えが返らないことがあります。</p>
+      <div id="thinkBox" class="hidden">
+        <label class="text-xs opacity-70" for="think">思考モード</label>
+        <select id="think" class="select select-bordered select-sm w-full mt-1"></select>
+        <p id="thinkNote" class="text-xs opacity-50 mt-1"></p>
       </div>
       <div>
         <label class="text-xs opacity-70">思考のタイムアウト（秒 / 0で無効）</label>
@@ -452,6 +450,65 @@ function setStatus(t, cls=""){
   statusEl.className = "text-xs whitespace-nowrap ml-auto basis-full text-right sm:basis-auto " +
     (cls==="ok" ? "text-success" : cls==="err" ? "text-error" : "opacity-70");
 }
+// ---- モデルごとの思考能力を判定する ---------------------------------------
+// 実測(2026-09-01)で3モデル3様だったため、選べない選択肢はUIに出さない。
+//   "none"  : capabilities に thinking が無い。think を送ると400 (llama3.1:8b)
+//   "bool"  : ON/OFF のみ意味がある。low/medium/high は送っても差が出ない (qwen3.5)
+//   "level" : レベル制。think:false を送っても思考をやめないので OFF は出さない (gpt-oss:20b)
+// レベル制かどうかは、テンプレートが {{ .ThinkLevel }} を参照しているかで見分ける。
+//
+// 【UIに出すのは "level" だけ】"bool" は動くが、このPC(RTX 2060 6GB)では実用にならない。
+// 実測(2026-09-01, qwen3.5:9b, 45%CPU/55%GPU): 雑談レベルの質問でも思考4000字・回答開始まで
+// 134秒、要約では199秒。thinkTimeout(既定60秒)が必ず作動して回答に辿り着かない。
+// レベル制(gpt-oss)はMoEで思考量そのものを絞れる("低"で思考9〜32字)ため実用範囲に入る。
+// 速いGPUに載せ替えたらここに "bool" を足すだけで元に戻せる。
+const thinkCaps = {};          // { model: "none"|"bool"|"level" } 一度引いたらキャッシュ
+let thinkKind = "bool";        // 現在選択中のモデルの型
+const THINK_LEVELS = [["low","低（速い）"],["medium","中"],["high","高（じっくり）"]];
+const THINK_SHOW = new Set(["level"]);   // 思考UIを出す型（上のコメント参照）
+
+async function probeThink(model){
+  if(!model) return "bool";
+  if(thinkCaps[model]) return thinkCaps[model];
+  let kind = "bool";           // 判定できなければ無難に ON/OFF 扱い
+  try{
+    const r = await fetch(base()+"/api/show", { method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({ model }) });
+    if(r.ok){
+      const j = await r.json();
+      if(!(j.capabilities||[]).includes("thinking")) kind = "none";
+      else if(/\.ThinkLevel/.test(j.template||"")) kind = "level";
+    }
+  }catch{}
+  thinkCaps[model] = kind;
+  return kind;
+}
+
+// 保存してある好み(settings.think)を、そのモデルで実際に意味のある値へ写像する
+function thinkFor(kind, pref){
+  if(!THINK_SHOW.has(kind)) return false;   // 出さない型は常に思考させない
+  return pref === true ? "medium" : (pref === false ? "low" : pref);
+}
+
+// いま選ばれている値を /api/chat の think パラメータに変換
+function thinkParam(){
+  if(!THINK_SHOW.has(thinkKind)) return false;
+  return thinkEl.value || "low";
+}
+
+async function syncThinkUI(){
+  thinkKind = await probeThink(modelEl.value);
+  const box = $("thinkBox"), note = $("thinkNote");
+  if(!THINK_SHOW.has(thinkKind)){   // 非対応 or このPCでは実用にならない型は、トグルごと隠す
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  thinkEl.innerHTML = THINK_LEVELS.map(([v,l])=>`<option value="${v}">${escapeHtml(l)}</option>`).join("");
+  thinkEl.value = thinkFor(thinkKind, settings.think);
+  note.textContent = "このモデルは思考を完全にOFFにできません（OFFを指定しても考えます）。最小は「低」です。";
+}
+
 async function loadModels(){
   setStatus("接続確認中..."); modelEl.innerHTML="";
   try{
@@ -461,6 +518,7 @@ async function loadModels(){
     modelEl.innerHTML = names.map(n=>`<option>${escapeHtml(n)}</option>`).join("");
     if(settings.model && names.includes(settings.model)) modelEl.value = settings.model;
     setStatus("接続OK","ok");
+    await syncThinkUI();
   }catch(e){ modelEl.innerHTML="<option>接続失敗</option>"; setStatus("接続できません: "+e.message,"err"); }
 }
 
@@ -504,7 +562,7 @@ async function generate(opts = {}){
   controller = new AbortController();
   setBusy(true); refreshActions(); scrollDown(true);
 
-  const useThink = opts.think !== undefined ? opts.think : thinkEl.checked;
+  const useThink = opts.think !== undefined ? opts.think : thinkParam();
   const tmo = opts.noTimeout ? 0 : (settings.thinkTimeout || 0);
 
   let full="", thought="", errMsg="", lastPaint=0, thinkMs=0;
@@ -591,10 +649,20 @@ async function generate(opts = {}){
         : "⚠️ 回答が出る前に終了しました" + (errMsg ? "（" + errMsg + "）" : "") + "（履歴には保存されません）";
       wrap._foot.appendChild(s);
       // やり直しはユーザーに選ばせる。勝手に再送信はしない。
-      const off = mkBtn("思考OFFで再実行", () => { if(!controller) generate({ think:false }); });
-      off.className = "btn btn-primary btn-xs";
-      const on = mkBtn("もう一度（思考ON）", () => { if(!controller) generate({ think:true, noTimeout:true }); });
-      wrap._foot.append(off, on);
+      // 押しても状況が変わらない選択肢は出さない（思考をOFFにできないモデルの「OFFで再実行」等）。
+      if(THINK_SHOW.has(thinkKind)){
+        if(useThink !== "low"){
+          const lo = mkBtn("思考「低」で再実行", () => { if(!controller) generate({ think:"low" }); });
+          lo.className = "btn btn-primary btn-xs";
+          wrap._foot.appendChild(lo);
+        }
+        const again = mkBtn("もう一度（時間制限なし）", () => { if(!controller) generate({ think: useThink, noTimeout:true }); });
+        wrap._foot.appendChild(again);
+      } else {   // 思考は使わない型。やり直しの選択肢は1つだけ
+        const again = mkBtn("もう一度", () => { if(!controller) generate({ think:false }); });
+        again.className = "btn btn-primary btn-xs";
+        wrap._foot.appendChild(again);
+      }
       refreshActions();
       scrollDown(false);
     } else {
@@ -691,9 +759,9 @@ inputEl.addEventListener("keydown", (e) => {
   if(settings.enterSend && !e.shiftKey){ e.preventDefault(); send(); }
 });
 serverEl.onchange = () => { settings.server = serverEl.value; save(LS.settings, settings); loadModels(); };
-modelEl.onchange = () => { settings.model = modelEl.value; save(LS.settings, settings); };
+modelEl.onchange = () => { settings.model = modelEl.value; save(LS.settings, settings); syncThinkUI(); };
 tempEl.oninput = () => { tempValEl.textContent = parseFloat(tempEl.value).toFixed(1); settings.temp = parseFloat(tempEl.value); save(LS.settings, settings); };
-thinkEl.onchange = () => { settings.think = thinkEl.checked; save(LS.settings, settings); };
+thinkEl.onchange = () => { settings.think = thinkParam(); save(LS.settings, settings); };
 $("autoTitle").onchange = (e) => { settings.autoTitle = e.target.checked; save(LS.settings, settings); };
 $("enterSend").onchange = (e) => { settings.enterSend = e.target.checked; save(LS.settings, settings); syncEnterHint(); };
 $("thinkTimeout").onchange = (e) => {
@@ -723,7 +791,6 @@ async function migrateLocal(){
 serverEl.value = settings.server && /:11434/.test(settings.server) ? location.origin : (settings.server || location.origin);
 systemEl.value = settings.system || "";
 tempEl.value = settings.temp ?? 0.8; tempValEl.textContent = parseFloat(tempEl.value).toFixed(1);
-thinkEl.checked = !!settings.think;
 $("autoTitle").checked = !!settings.autoTitle;
 $("enterSend").checked = !!settings.enterSend;
 $("thinkTimeout").value = settings.thinkTimeout;
