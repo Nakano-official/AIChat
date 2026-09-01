@@ -603,7 +603,7 @@ const WEB_MAX_PAGE = 2500;   // 1ページから取り込む文字数の上限
 const WEB_MAX_ALL  = 7000;   // 全体の上限（num_ctx 8192 を溢れさせないため）
 const URL_RE = /https?:\/\/[^\s<>"'）】」]+/g;
 
-let webMode = false;         // 🔍トグル。ONの時だけ検索する
+let webMode = "off";         // 🔍トグル: "off"=URLのみ / "auto"=モデルが判断 / "always"=毎回検索
 
 function webNote(text, cls){
   const d = document.createElement("div");
@@ -611,6 +611,45 @@ function webNote(text, cls){
   d.textContent = text;
   chatEl.appendChild(d); scrollDown(false);
   return d;
+}
+
+// モデル自身に「検索が必要か」を判断させる（Ollama のツール呼び出し）。
+// 判定のために1往復ぶん余計に待つので、webMode==="auto" の時だけ実行する。
+// 検索語はモデルが組み立てるため、何を外に出したかを必ず画面に出すこと。
+const WEB_TOOLS = [{
+  type: "function",
+  function: {
+    name: "web_search",
+    description: "最新の情報や、自分が知らない事実を調べる必要があるときにウェブを検索する。"
+               + "一般常識・計算・雑談・文章の書き方の相談など、自分の知識で答えられることには使わない。",
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string", description: "検索キーワード。質問文のままではなく、検索に適した短い語にする。" } },
+      required: ["query"],
+    },
+  },
+}];
+
+// 検索すべきならクエリ文字列、不要なら null を返す。失敗時も null（＝検索しない）。
+async function webDecide(text){
+  try{
+    const r = await fetch(base()+"/api/chat", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ model: modelEl.value, stream:false, think:false, tools: WEB_TOOLS,
+        messages:[{ role:"user", content:text }],
+        // num_predict は実測で決めた値。小さすぎるとツール呼び出しのJSONが途中で切れ、
+        // tool_calls が消えて「黙って検索しない」状態になる（32では長い検索語が全滅）。
+        // 逆に大きいと、検索不要な時に通常の回答を書き始めて待ち時間が伸びる（200で最悪27秒）。
+        // 48: 短い質問5/5・長い検索語3/3・最悪6.4秒。
+        options:{ temperature:0.1, num_ctx:8192, num_predict:48 } }),
+    });
+    if(!r.ok) return null;
+    const j = await r.json();
+    const tc = ((j.message||{}).tool_calls||[])[0];
+    if(!tc || !tc.function || tc.function.name !== "web_search") return null;
+    const q = (tc.function.arguments||{}).query;
+    return (typeof q === "string" && q.trim()) ? q.trim().slice(0, 200) : null;
+  }catch(e){ return null; }
 }
 
 async function webSearch(query){
@@ -638,14 +677,22 @@ async function buildWebContext(text){
       catch(e){ webNote("⚠️ 読み込み失敗: " + u + " (" + e.message + ")", "text-warning"); }
     }
     note.remove();
-  } else if(webMode){                    // URLが無く検索ONなら、発言をそのまま検索語にする
-    const note = webNote("🔍 検索中: " + text.slice(0, 60));
+  } else if(webMode !== "off"){          // URLが無い時だけ検索を検討する
+    let query = text;
+    if(webMode === "auto"){              // モデルに要否を判断させる（1往復ぶん待つ）
+      const think = webNote("🔍 検索が必要か判断中…");
+      query = await webDecide(text);
+      think.remove();
+      if(!query) return "";              // 自分の知識で答えられる、と判断した
+      webNote("🔍 モデルの判断で検索します: 「" + query + "」");
+    }
+    const note = webNote("🔍 検索中: " + query.slice(0, 60));
     let hits = [];
-    try{ hits = await webSearch(text); }
+    try{ hits = await webSearch(query); }
     catch(e){ note.remove(); webNote("⚠️ 検索失敗: " + e.message, "text-warning"); return ""; }
     note.remove();
-    if(!hits.length){ webNote("🔍 検索結果なし: " + text.slice(0, 60), "text-warning"); return ""; }
-    const list = webNote("🔍 「" + text.slice(0, 40) + "」を検索 → 上位" + Math.min(WEB_TOP_N, hits.length) + "件を読み込み中…");
+    if(!hits.length){ webNote("🔍 検索結果なし: " + query.slice(0, 60), "text-warning"); return ""; }
+    const list = webNote("🔍 「" + query.slice(0, 40) + "」→ 上位" + Math.min(WEB_TOP_N, hits.length) + "件を読み込み中…");
     for(const h of hits.slice(0, WEB_TOP_N)){
       try{ const p = await webFetch(h.url); pages.push({ ...p, title: p.title || h.title }); }
       catch(e){ /* 1件失敗しても続ける */ }
@@ -902,16 +949,23 @@ serverEl.onchange = () => { settings.server = serverEl.value; save(LS.settings, 
 modelEl.onchange = () => { settings.model = modelEl.value; save(LS.settings, settings); syncThinkUI(); };
 tempEl.oninput = () => { tempValEl.textContent = parseFloat(tempEl.value).toFixed(1); settings.temp = parseFloat(tempEl.value); save(LS.settings, settings); };
 thinkEl.onchange = () => { settings.think = thinkParam(); save(LS.settings, settings); };
+const WEB_MODES = ["off", "auto", "always"];
 $("webtoggle").onclick = () => {
-  webMode = !webMode;
+  webMode = WEB_MODES[(WEB_MODES.indexOf(webMode) + 1) % WEB_MODES.length];
   settings.web = webMode; save(LS.settings, settings);
   syncWebToggle();
 };
 function syncWebToggle(){
   const b = $("webtoggle");
-  b.classList.toggle("btn-ghost", !webMode);
-  b.classList.toggle("btn-primary", webMode);
-  b.title = webMode ? "ウェブ検索: ON（発言を検索して結果を読みます）" : "ウェブ検索: OFF（URLを貼った時だけ読み込みます）";
+  b.textContent = webMode === "off" ? "🔍" : (webMode === "auto" ? "🔍 自" : "🔍 常");
+  b.classList.toggle("btn-ghost",   webMode === "off");
+  b.classList.toggle("btn-primary", webMode !== "off");
+  b.classList.toggle("btn-square",  webMode === "off");
+  b.title = webMode === "off"
+    ? "ウェブ検索: OFF（URLを貼った時だけ読み込みます）"
+    : webMode === "auto"
+      ? "ウェブ検索: 自動（必要かどうかをモデルが判断します。1往復ぶん遅くなります）"
+      : "ウェブ検索: 常時（毎回、発言をそのまま検索します）";
 }
 $("autoTitle").onchange = (e) => { settings.autoTitle = e.target.checked; save(LS.settings, settings); };
 $("enterSend").onchange = (e) => { settings.enterSend = e.target.checked; save(LS.settings, settings); syncEnterHint(); };
@@ -945,7 +999,8 @@ tempEl.value = settings.temp ?? 0.8; tempValEl.textContent = parseFloat(tempEl.v
 $("autoTitle").checked = !!settings.autoTitle;
 $("enterSend").checked = !!settings.enterSend;
 $("thinkTimeout").value = settings.thinkTimeout;
-webMode = !!settings.web; syncWebToggle();
+webMode = WEB_MODES.includes(settings.web) ? settings.web : (settings.web ? "always" : "off");  // 旧: true/false
+syncWebToggle();
 syncEnterHint();
 systemEl.oninput = () => { settings.system = systemEl.value; save(LS.settings, settings); };
 renderPersonas();
