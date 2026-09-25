@@ -86,6 +86,11 @@
           <span id="tempVal" class="tabular-nums w-9 text-right">0.8</span>
         </div>
       </div>
+      <div>
+        <label class="text-xs opacity-70" for="readModel">調査でページを読むモデル</label>
+        <select id="readModel" class="select select-bordered select-sm w-full mt-1"></select>
+        <p class="text-xs opacity-50 mt-1">資料を1ページずつ読んで要点にまとめる担当です。小さいモデルの方が速く、資料が手元にある作業なので精度差が出にくくなります。回答の統括は上のモデルが行います。</p>
+      </div>
       <div id="thinkBox" class="hidden">
         <label class="text-xs opacity-70" for="think">思考モード</label>
         <select id="think" class="select select-bordered select-sm w-full mt-1"></select>
@@ -124,7 +129,7 @@
 const $ = (id) => document.getElementById(id);
 const serverEl=$("server"), modelEl=$("model"), chatEl=$("chat"), inputEl=$("input"),
       statusEl=$("status"), systemEl=$("system"), personaEl=$("persona"),
-      tempEl=$("temp"), tempValEl=$("tempVal"), thinkEl=$("think"),
+      tempEl=$("temp"), tempValEl=$("tempVal"), thinkEl=$("think"), readModelEl=$("readModel"),
       searchEl=$("search"), toBottomEl=$("tobottom"), sendEl=$("send");
 
 // タッチ端末かどうか。Enterの既定挙動・自動フォーカスの判断に使う
@@ -351,8 +356,7 @@ function paintResearch(wrap, research){
   details.className = "text-xs mt-2";
   const summary = document.createElement("summary");
   summary.className = "cursor-pointer";
-  const labels = { tentative:"参考回答・ウェブでの確認は不十分", checked:"根拠と照合済み（AI判定）", partial:"一部の根拠が不足", incomplete:"結論を保留", unavailable:"確認できませんでした", stopped:"調査を停止" };
-  summary.textContent = "調査の詳細 · " + (labels[research.status] || "調査中");
+  summary.textContent = "調査の詳細";
   details.appendChild(summary);
   const body = document.createElement("div"); body.className = "space-y-2 mt-2 break-words";
   function note(text){ const p = document.createElement("p"); p.textContent = text; body.appendChild(p); }
@@ -368,20 +372,17 @@ function paintResearch(wrap, research){
     a.href = s.url; a.target = "_blank"; a.rel = "noopener noreferrer";
     a.className = "link block"; a.textContent = s.id + ": " + (s.title || s.url);
     body.appendChild(a);
-    for(const e of (research.evidence || []).filter(e => e.sourceId === s.id)) note(e.id + " 原文: 「" + e.quote + "」");
-  }
-  for(const c of research.checks || []){
-    const label = c.verdict === "supported" ? "採用" : (c.verdict === "conflicting" ? "除外・矛盾" : "除外・根拠不足");
-    note(label + " — " + c.text + " / " + c.evidenceIds.join(", ") + " / " + c.reason);
-  }
+    for(const note_ of (research.notes || []).filter(x => x.sourceId === s.id)) note("・" + note_.text);
+    }
   for(const missing of research.missing || []) note("未解決: " + missing);
   details.appendChild(body); wrap._bubble.appendChild(details); wrap._research = details;
 }
 const RESEARCH_STAGE_UI = {
   plan:['調査を組み立てています','🧭'], search:['ウェブを検索しています','🔎'],
   select:['読むページを選んでいます','📑'], read:['ページを確認しています','🌐'],
-  gaps:['情報の抜けを確認しています','🧩'], draft:['根拠から回答を組み立てています','✍️'],
-  verify:['主張と根拠を照合しています','✓'], fallback:['参考回答を作っています','💡'],
+  gaps:['情報の抜けを確認しています','🧩'], write:['集めた要点から回答を書いています','✍️'],
+  condense:['集めた資料をまとめ直しています','🗜️'],
+  fallback:['参考回答を作っています','💡'],
   warning:['別の方法を試しています','⚠️'],
 };
 function researchUrl(value){
@@ -432,7 +433,7 @@ function paintResearchProgress(wrap, research, event){
     '検索 ' + (research.queries?.length || 0) + '件',
     '候補 ' + (research.searchSummaries?.length || 0) + '件',
     '確認 ' + (research.sources?.length || 0) + 'ページ',
-    '根拠 ' + (research.evidence?.length || 0) + '件',
+    '要点 ' + (research.notes?.length || 0) + '件',
   ];
   live._stats.replaceChildren(...counts.map(value => {
     const span = document.createElement('span'); span.textContent = value; return span;
@@ -710,10 +711,16 @@ async function loadModels(){
   setStatus("接続確認中..."); modelEl.innerHTML="";
   try{
     const r = await fetch(base()+"/api/tags"); if(!r.ok) throw new Error("HTTP "+r.status);
-    const names = ((await r.json()).models||[]).map(m=>m.name);
+    const models = ((await r.json()).models||[]);
+    const names = models.map(m=>m.name);
     if(!names.length){ modelEl.innerHTML="<option>モデルなし</option>"; setStatus("モデルなし","err"); return; }
     modelEl.innerHTML = names.map(n=>`<option>${escapeHtml(n)}</option>`).join("");
     if(settings.model && names.includes(settings.model)) modelEl.value = settings.model;
+    // 調査でページを読むモデル。既定は一番小さいもの（速く、資料が手元にある作業なので差が出にくい）。
+    readModelEl.innerHTML = names.map(n=>`<option>${escapeHtml(n)}</option>`).join("");
+    const smallest = models.slice().sort((a,b)=>(a.size||0)-(b.size||0))[0]?.name;
+    readModelEl.value = names.includes(settings.readModel) ? settings.readModel : (smallest || modelEl.value);
+    settings.readModel = readModelEl.value; save(LS.settings, settings);
     setStatus("接続OK","ok");
     await refreshGpuFit();
     await syncThinkUI();
@@ -760,32 +767,42 @@ async function generateResearched(opts = {}){
   controller = operation; setBusy(true); refreshActions();
   const wrap = buildShell("assistant");
   chatEl.appendChild(wrap);
-  let audit = { version:1, model:useModel, status:"incomplete", events:[], sources:[], evidence:[], checks:[], missing:[], startedAt:new Date().toISOString() };
+  let audit = { version:1, model:useModel, status:"incomplete", events:[], sources:[], notes:[], missing:[], startedAt:new Date().toISOString() };
   let result;
   let latestProgress = { stage:'plan', message:'調査を始めています…' };
   paintResearchProgress(wrap, audit, latestProgress);
-  const progressTimer = setInterval(() => paintResearchProgress(wrap, audit, latestProgress), 1000);
+  let progressTimer = setInterval(() => paintResearchProgress(wrap, audit, latestProgress), 1000);
   const allTimer = setTimeout(() => operation.abort("timeout"), 8 * 60 * 1000);
   try{
     const kind = await probeThink(useModel, operation.signal);
     operation.signal.throwIfAborted();
-    const client = WebResearch.createClient({ base:endpoint, model:useModel, think:kind === "level" ? "low" : false });
+    const client = WebResearch.createClient({ base:endpoint, model:useModel, readModel:(readModelEl.value || useModel), think:kind === "level" ? "low" : false });
     result = await WebResearch.run({
       question:conversation.messages.at(-1).content,
-      history:conversation.messages.slice(0,-1).filter(m => !m.research || ["checked","partial","tentative"].includes(m.research.status)),
+      history:conversation.messages.slice(0,-1).filter(m => !m.research || ["researched","checked","partial","tentative"].includes(m.research.status)),
       model:useModel, system:style, signal:operation.signal, ...client,
-      onProgress(event, state){
-        audit = state;
-        latestProgress = event;
-        paintResearchProgress(wrap, audit, latestProgress);
-        scrollDown(false);
-      },
+        onProgress(event, state){
+          audit = state;
+          // 最終段の差分は進捗行ではなく吹き出しへ。書けた端から本文が伸びていく。
+          // 1秒ごとの再描画を止めないと、消した進捗表示が復活してちらつく。
+          if(event.delta){
+            clearInterval(progressTimer); progressTimer = null;
+            clearResearchProgress(wrap);
+            paintMessage(wrap, { role:"assistant", content:event.message }, true);
+            scrollDown(false);
+            return;
+          }
+          if(!progressTimer) return;   // 回答が流れ始めたら、以後は進捗に戻さない
+          latestProgress = event;
+          paintResearchProgress(wrap, audit, latestProgress);
+          scrollDown(false);
+        },
     });
   }catch(e){
     const stopped = operation.signal.aborted;
     audit.status = stopped ? "stopped" : "unavailable"; audit.finishedAt = new Date().toISOString();
     result = { content:stopped
-      ? (operation.signal.reason === "timeout" ? "調査が制限時間に達したため停止しました。" : "調査を停止しました。") + "未検証の回答は表示していません。再生成でやり直せます。"
+      ? (operation.signal.reason === "timeout" ? "調査が制限時間に達したため停止しました。" : "調査を停止しました。") + "途中までの回答は表示していません。再生成でやり直せます。"
       : "調査を完了できませんでした: " + e.message, research:audit };
   }finally{
     clearTimeout(allTimer);
@@ -797,7 +814,7 @@ async function generateResearched(opts = {}){
     // 保存が終わるまで会話切替を抑止し、別会話への結果の混入を防ぐ。
     await saveCur();
     controller = null; setBusy(false); refreshActions(); focusInput(); scrollDown(false);
-    setStatus(result.research.status === "checked" ? "根拠との照合が完了" : result.research.status === "tentative" ? "参考回答（ウェブでの確認は不十分）" : "調査が終了しました");
+    setStatus("調査が終了しました");   // 検証できたかどうかは主張しない（設計上そうなるだけなので）
     refreshGpuFit().then(ch => { if(ch) syncThinkUI(); });
     if(["checked","partial","tentative"].includes(result.research.status)) autoTitle();
   }
@@ -1026,6 +1043,7 @@ inputEl.addEventListener("keydown", (e) => {
 });
 serverEl.onchange = () => { settings.server = serverEl.value; save(LS.settings, settings); loadModels(); };
 modelEl.onchange = () => { settings.model = modelEl.value; save(LS.settings, settings); syncThinkUI(); keepWarm(); };
+readModelEl.onchange = () => { settings.readModel = readModelEl.value; save(LS.settings, settings); };
 tempEl.oninput = () => { tempValEl.textContent = parseFloat(tempEl.value).toFixed(1); settings.temp = parseFloat(tempEl.value); save(LS.settings, settings); };
 thinkEl.onchange = () => { settings.think = thinkParam(); save(LS.settings, settings); };
 const WEB_MODES = ["research", "off"];

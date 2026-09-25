@@ -68,7 +68,7 @@ async function evaluate(expression){
  await until(()=>evaluate('typeof cur !== "undefined" && cur && modelEl.value === "test-model"'));
  await evaluate('settings.autoTitle=false; save(LS.settings,settings); inputEl.value="山の標高は？"; send()');
  let state=await evaluate('({status:cur.messages.at(-1).research.status, count:cur.messages.length, links:msgEls.at(-1)._ans.querySelectorAll("a").length, details:!!msgEls.at(-1)._research, busy:!!controller})');
- assert.deepEqual(state,{status:"checked",count:2,links:1,details:true,busy:false});
+ assert.deepEqual(state,{status:"checked",count:2,links:0,details:true,busy:false});
  assert.equal(queries,1);
  await evaluate('regenerate()');assert.equal(queries,2);
  await cdp("Page.reload");
@@ -101,7 +101,7 @@ async function evaluate(expression){
  assert.equal(await evaluate('msgEls.at(-1)._ans.querySelectorAll("a").length'),0);
  await cdp("Page.reload");
  await until(()=>evaluate('typeof cur !== "undefined" && cur?.messages.at(-1)?.research?.status==="tentative" && !!msgEls.at(-1)?._research'));
- assert.match(await evaluate('msgEls.at(-1)._research.textContent'),/参考回答・ウェブでの確認は不十分/);
+ assert.match(await evaluate('msgEls.at(-1)._research.textContent'),/調査の詳細/);
  assert.equal(errors.length,0,JSON.stringify(errors));
  await cdp("Emulation.setDeviceMetricsOverride",{width:390,height:844,deviceScaleFactor:1,mobile:true});
  assert.equal(await evaluate('document.documentElement.scrollWidth <= 390'),true);
