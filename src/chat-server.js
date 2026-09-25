@@ -255,16 +255,77 @@ function isBlockedHost(hostname) {
   return false;
 }
 
-function webGet(target, depth) {
+function webError(message, httpStatus = 502, code = "FETCH_FAILED", extra = {}) {
+  return Object.assign(new Error(message), { httpStatus, code, ...extra });
+}
+function checkedWebUrl(target) {
+  let u;
+  try { u = new URL(target); } catch { throw webError("URLが不正です", 400, "INVALID_URL"); }
+  if (!["http:", "https:"].includes(u.protocol)) throw webError("http/https のみ扱えます", 400, "INVALID_URL");
+  if (u.username || u.password || isBlockedHost(u.hostname)) throw webError("内部アドレスや認証情報付きURLにはアクセスできません", 403, "BLOCKED_URL");
+  return u;
+}
+function upstreamError(status) {
+  return webError("取得先がHTTP " + status + "を返しました", status >= 400 && status < 500 ? status : 502, "UPSTREAM_HTTP", { upstreamStatus:status });
+}
+// Only legacy TLS negotiation failures retry through the Windows native TLS stack.
+// Certificate verification remains enabled. Redirects still pass checkedWebUrl.
+async function webGet(target, depth = 0, signal) {
+  try { return await webGetNode(target, depth, signal); }
+  catch (e) {
+    if (signal?.aborted) throw e;
+    if (process.platform === "win32" && /unsafe legacy renegotiation disabled/i.test(e.message)) {
+      log("  -> web native TLS retry: " + new URL(target).hostname);
+      return webGetNative(target, depth, signal);
+    }
+    throw e;
+  }
+}
+async function webGetNative(target, depth = 0, signal) {
+  const u = checkedWebUrl(target);
+  const binary = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "curl.exe");
+  const result = await new Promise((resolve, reject) => {
+    execFile(binary, ["--disable", "--silent", "--show-error", "--include", "--compressed",
+      "--noproxy", "*", "--proto", "=http,https", "--max-time", "15", "--max-filesize", String(WEB_MAX_BYTES),
+      "--user-agent", WEB_UA, "--header", "Accept-Language: ja,en;q=0.8", "--url", u.href],
+      { windowsHide:true, encoding:"buffer", maxBuffer:WEB_MAX_BYTES + 65536, timeout:WEB_TIMEOUT + 1000, signal },
+      (error, stdout) => {
+        if (error) return reject(webError(error.code === 28 ? "取得先への接続がタイムアウトしました" : "Windows標準の通信処理でも取得できませんでした",
+          error.code === 28 ? 504 : 502, "NATIVE_FETCH_FAILED"));
+        let offset = 0, status = 0, headers = {};
+        while (stdout.subarray(offset, offset + 5).toString() === "HTTP/") {
+          const end = stdout.indexOf("\r\n\r\n", offset);
+          if (end < 0) return reject(webError("取得先のHTTPヘッダーが不正です"));
+          const lines = stdout.subarray(offset, end).toString("latin1").split("\r\n");
+          status = Number(lines.shift().split(" ")[1]); headers = {};
+          for (const line of lines) {
+            const i = line.indexOf(":");
+            if (i > 0) headers[line.slice(0, i).toLowerCase()] = line.slice(i + 1).trim();
+          }
+          offset = end + 4;
+          if (status >= 200) break;
+        }
+        if (!status) return reject(webError("取得先のHTTPステータスを読み取れません"));
+        const buf = stdout.subarray(offset);
+        if (buf.length > WEB_MAX_BYTES) return reject(webError("取得サイズが上限を超えました", 413, "TOO_LARGE"));
+        resolve({ status, headers, buf, url:u.href });
+      });
+  });
+  if (result.status >= 300 && result.status < 400 && result.headers.location) {
+    if (depth >= WEB_MAX_REDIRECT) throw webError("リダイレクトが多すぎます");
+    return webGetNative(new URL(result.headers.location, u).href, depth + 1, signal);
+  }
+  if (result.status !== 200) throw upstreamError(result.status);
+  return result;
+}
+function webGetNode(target, depth, signal) {
   depth = depth || 0;
   return new Promise((resolve, reject) => {
     let u;
-    try { u = new URL(target); } catch { return reject(new Error("URLが不正です")); }
-    if (u.protocol !== "http:" && u.protocol !== "https:") return reject(new Error("http/https のみ扱えます"));
-    if (isBlockedHost(u.hostname)) return reject(new Error("内部アドレスへのアクセスは許可されていません"));
+    try { u = checkedWebUrl(target); } catch (e) { return reject(e); }
     const mod = u.protocol === "https:" ? https : http;
     const req = mod.request({
-      hostname: u.hostname, port: u.port || undefined, path: (u.pathname || "/") + u.search, method: "GET",
+      hostname: u.hostname, port: u.port || undefined, path: (u.pathname || "/") + u.search, method: "GET", signal,
       headers: { "user-agent": WEB_UA, "accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
                  "accept-language": "ja,en;q=0.8", "accept-encoding": "gzip, deflate" },
     }, (res) => {
@@ -274,9 +335,9 @@ function webGet(target, depth) {
         if (depth >= WEB_MAX_REDIRECT) return reject(new Error("リダイレクトが多すぎます"));
         let next;
         try { next = new URL(res.headers.location, u).href; } catch { return reject(new Error("リダイレクト先が不正です")); }
-        return resolve(webGet(next, depth + 1));
+        return resolve(webGet(next, depth + 1, signal));
       }
-      if (code !== 200) { res.resume(); return reject(new Error("取得できませんでした (HTTP " + code + ")")); }
+      if (code !== 200) { res.resume(); return reject(upstreamError(code)); }
       const enc = String(res.headers["content-encoding"] || "").toLowerCase();
       let stream = res;
       if (enc === "gzip") stream = res.pipe(zlib.createGunzip());
@@ -285,13 +346,13 @@ function webGet(target, depth) {
       stream.on("data", (c) => {
         if (cut) return;
         size += c.length;
-        if (size > WEB_MAX_BYTES) { cut = true; req.destroy(); return; }   // 上限で打ち切り
+        if (size > WEB_MAX_BYTES) { cut = true; const error = webError("取得サイズが上限を超えました", 413, "TOO_LARGE"); stream.destroy(error); req.destroy(error); reject(error); return; }   // 上限で打ち切り
         chunks.push(c);
       });
       stream.on("end", () => resolve({ url: u.href, headers: res.headers, buf: Buffer.concat(chunks) }));
-      stream.on("error", (e) => (cut ? resolve({ url: u.href, headers: res.headers, buf: Buffer.concat(chunks) }) : reject(e)));
+      stream.on("error", reject);
     });
-    req.setTimeout(WEB_TIMEOUT, () => req.destroy(new Error("タイムアウトしました")));
+    req.setTimeout(WEB_TIMEOUT, () => req.destroy(webError("取得先への接続がタイムアウトしました", 504, "TIMEOUT")));
     req.on("error", (e) => reject(e));
     req.end();
   });
@@ -360,32 +421,100 @@ function parseDuckDuckGo(html) {
   return out;
 }
 
+function parseBingRss(xml) {
+  const out = [], seen = new Set();
+  function field(item, name) {
+    const match = new RegExp("<" + name + "(?:\\s[^>]*)?>([\\s\\S]*?)</" + name + ">", "i").exec(item);
+    return decodeEntities((match?.[1] || "").replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")).trim();
+  }
+  for (const match of xml.matchAll(/<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/gi)) {
+    const item = match[1];
+    let u;
+    try { u = checkedWebUrl(field(item, "link")); } catch { continue; }
+    if (seen.has(u.href)) continue;
+    seen.add(u.href);
+    out.push({ title:field(item, "title").replace(/<[^>]+>/g, ""), url:u.href,
+      snippet:field(item, "description").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 800) });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+const webSearchCache = new Map();
+let duckDuckGoRetryAfter = 0;
+async function searchWeb(query, signal) {
+  signal?.throwIfAborted();
+  const cached = webSearchCache.get(query);
+  if (cached && cached.expires > Date.now()) return { ...cached.value, cached:true };
+  const notices = [];
+  if (Date.now() < duckDuckGoRetryAfter) notices.push("DuckDuckGoがアクセス制限中のため、Bingで検索します。");
+  const providers = [
+    ...(Date.now() < duckDuckGoRetryAfter ? [] : [{ name:"DuckDuckGo", url:"https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query), parse:parseDuckDuckGo }]),
+    { name:"Bing", url:"https://www.bing.com/search?format=rss&q=" + encodeURIComponent(query), parse:parseBingRss },
+  ];
+  for (const provider of providers) {
+    signal?.throwIfAborted();
+    try {
+      const timedSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(8500)]) : AbortSignal.timeout(8500);
+      const r = await webGet(provider.url, 0, timedSignal);
+      const body = decodeBody(r.buf, r.headers);
+      if (provider.name === "DuckDuckGo" && /anomaly\.js|challenge-form|anomaly-modal/i.test(body)) {
+        throw webError("自動アクセスの確認が必要です", 429, "SEARCH_CHALLENGE", { upstreamStatus:202 });
+      }
+      const results = provider.parse(body);
+      if (!results.length) { notices.push(provider.name + "では検索結果を取得できませんでした。"); continue; }
+      const value = { query, results, provider:provider.name, notices };
+      if (webSearchCache.size >= 100) webSearchCache.delete(webSearchCache.keys().next().value);
+      webSearchCache.set(query, { expires:Date.now() + 5 * 60 * 1000, value });
+      log("  -> web search success: " + provider.name + " (" + results.length + " results)");
+      return value;
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      const limited = [202, 403, 429].includes(e.upstreamStatus);
+      if (provider.name === "DuckDuckGo" && limited) duckDuckGoRetryAfter = Date.now() + 10 * 60 * 1000;
+      const reason = limited ? "自動アクセスが制限されています" : e.name === "AbortError" ? "タイムアウトしました" : e.message;
+      notices.push(provider.name + ": " + reason);
+      log("  -> web search failed: " + provider.name + " / " + (e.upstreamStatus || e.code || e.name) + " / " + reason);
+    }
+  }
+  throw webError("検索サービスから結果を取得できませんでした。 " + notices.join(" / "), 503, "SEARCH_UNAVAILABLE");
+}
 async function handleWebApi(req, res) {
   const q = new URL(req.url, "http://x").searchParams;
   const p = req.url.split("?")[0];
+  const operation = new AbortController();
+  const stop = () => { if (!res.writableFinished) operation.abort(); };
+  res.on("close", stop);
+  const timer = setTimeout(() => operation.abort(), 20000);
   try {
     if (p === "/web/api/search" && req.method === "GET") {
-      const query = (q.get("q") || "").trim();
+      const query = (q.get("q") || "").trim().slice(0, 200);
       if (!query) return sendJson(res, 400, { error: "検索語が空です" });
       log(`  -> web search: ${query}`);          // 何を外に出したかログに残す
-      const r = await webGet("https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query));
-      const results = parseDuckDuckGo(decodeBody(r.buf, r.headers));
-      return sendJson(res, 200, { query, results });
+      return sendJson(res, 200, await searchWeb(query, operation.signal));
     }
     if (p === "/web/api/fetch" && req.method === "GET") {
       const target = (q.get("url") || "").trim();
       if (!target) return sendJson(res, 400, { error: "URLが空です" });
       log(`  -> web fetch: ${target}`);
-      const r = await webGet(target);
+      const r = await webGet(target, 0, operation.signal);
       const ct = String(r.headers["content-type"] || "");
+      if (!/text\/|html|xml|json/i.test(ct) || r.buf.subarray(0, 4).toString() === "%PDF") {
+        throw webError("この資料形式には未対応です（HTML・テキストのURLを指定してください）", 415, "UNSUPPORTED_TYPE");
+      }
       const body = decodeBody(r.buf, r.headers);
       const isHtml = /html|xml/i.test(ct) || /^\s*<(!doctype|html)/i.test(body);
       const text = isHtml ? htmlToText(body) : body;
-      return sendJson(res, 200, { url: r.url, title: isHtml ? pageTitle(body) : "", text, chars: text.length });
+      return sendJson(res, 200, { url: r.url, title: isHtml ? pageTitle(body) : "", text: text.slice(0, 180000), chars: text.length });
     }
     return sendJson(res, 404, { error: "unknown endpoint" });
   } catch (e) {
-    return sendJson(res, 502, { error: e.message });
+    const timeout = operation.signal.aborted || e.name === "AbortError";
+    const message = timeout ? "取得先への接続がタイムアウトしました" : e.message;
+    const status = timeout ? 504 : (e.httpStatus || 502);
+    log("  -> web error: " + status + " / " + (e.code || e.name) + " / " + message);
+    if (!res.destroyed) sendJson(res, status, { error:message, code:timeout ? "TIMEOUT" : (e.code || "FETCH_FAILED"), upstreamStatus:e.upstreamStatus });
+  } finally {
+    clearTimeout(timer); res.removeListener("close", stop);
   }
 }
 
@@ -568,6 +697,7 @@ const server = http.createServer((req, res) => {
     return proxyToOllama(req, res);
   }
   if (p === "/app.css") return serveFile(res, HTML("app.css"), "text/css; charset=utf-8");
+  if (p === "/research.js") return serveFile(res, HTML("research.js"), "application/javascript; charset=utf-8");
   if (p === "/shared.js") return serveFile(res, HTML("shared.js"), "application/javascript; charset=utf-8");
   if (p === "/notes" || p === "/notes.html") return serveFile(res, HTML("notes.html"));
   serveFile(res, HTML("chat.html"));

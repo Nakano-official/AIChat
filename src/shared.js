@@ -11,13 +11,19 @@
   }
 
   function inline(t) {
+    // Backslash-escaped Markdown stays literal, including model-supplied links.
+    const escaped = [];
+    t = String(t).replace(/\\([\\\x60*_{}\[\]()<>#!|])/g, (_, c) => {
+      escaped.push(escapeHtml(c));
+      return "\u0000E" + (escaped.length - 1) + "\u0000";
+    });
     t = escapeHtml(t);
     t = t.replace(/`([^`]+)`/g, '<code class="inline">$1</code>');
     t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
     t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
       '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-    return t;
+    return t.replace(/\u0000E(\d+)\u0000/g, (m, i) => escaped[+i] ?? m);
   }
 
   function renderMarkdown(src) {

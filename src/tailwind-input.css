@@ -40,3 +40,59 @@
 /* ストリーミング中の点滅カーソル */
 .cursor::after { content: "▋"; color: var(--fallback-p, oklch(var(--p))); animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
+
+/* ウェブ調査中のライブ進捗 */
+.research-live {
+  position: relative; overflow: hidden; width: min(78vw, 34rem); max-width: 100%;
+  padding: 0.85rem; border: 1px solid rgba(91, 140, 255, 0.25); border-radius: 0.8rem;
+  background: linear-gradient(145deg, rgba(91, 140, 255, 0.09), rgba(15, 17, 23, 0.38));
+}
+.research-live-scan {
+  position: absolute; inset: 0 auto auto 0; width: 36%; height: 2px;
+  background: linear-gradient(90deg, transparent, #5b8cff, transparent);
+  animation: research-scan 1.8s ease-in-out infinite;
+}
+@keyframes research-scan { from { transform: translateX(-120%); } to { transform: translateX(380%); } }
+.research-live-head { display: flex; align-items: center; gap: 0.45rem; }
+.research-live-icon { animation: research-pulse 1.4s ease-in-out infinite; }
+@keyframes research-pulse { 50% { opacity: 0.45; transform: scale(0.9); } }
+.research-live-title { font-size: 0.86rem; }
+.research-live-elapsed {
+  margin-left: auto; font-size: 0.7rem; opacity: 0.55; font-variant-numeric: tabular-nums;
+}
+.research-live-current { margin-top: 0.45rem; font-size: 0.8rem; overflow-wrap: anywhere; }
+.research-live-query {
+  margin-top: 0.45rem; padding: 0.35rem 0.5rem; border-radius: 0.45rem;
+  background: rgba(91, 140, 255, 0.1); font-size: 0.72rem; overflow-wrap: anywhere;
+}
+.research-live-stats { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.55rem; }
+.research-live-stats span {
+  padding: 0.15rem 0.4rem; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06); font-size: 0.68rem; opacity: 0.75;
+}
+.research-live-pages { display: grid; gap: 0.35rem; margin-top: 0.6rem; }
+.research-live-page {
+  display: grid; grid-template-columns: 1rem minmax(0, 1fr);
+  gap: 0.35rem; align-items: start; font-size: 0.74rem;
+}
+.research-live-page a {
+  display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--fallback-p, oklch(var(--p))); text-decoration: none;
+}
+.research-live-page a:hover { text-decoration: underline; }
+.research-live-page small {
+  display: block; opacity: 0.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.research-live-timeline {
+  display: grid; gap: 0.25rem; margin-top: 0.65rem; padding-top: 0.55rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+.research-live-step {
+  display: grid; grid-template-columns: 0.8rem minmax(0, 1fr);
+  gap: 0.3rem; font-size: 0.68rem; opacity: 0.45;
+}
+.research-live-step span:last-child { overflow-wrap: anywhere; }
+.research-live-step.is-active { opacity: 0.85; }
+@media (prefers-reduced-motion: reduce) {
+  .research-live-scan, .research-live-icon { animation: none; }
+}

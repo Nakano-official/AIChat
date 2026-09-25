@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/chat-server.js",
     "css": "tailwindcss -i ./src/tailwind-input.css -o ./src/app.css --minify",
-    "css:watch": "tailwindcss -i ./src/tailwind-input.css -o ./src/app.css --watch"
+    "css:watch": "tailwindcss -i ./src/tailwind-input.css -o ./src/app.css --watch",
+    "test": "node --test tests/*.test.js"
   },
   "keywords": [],
   "author": "",

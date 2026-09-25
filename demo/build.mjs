@@ -13,12 +13,13 @@ const OUT = join(ROOT, "_site");
 
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
-for (const f of ["app.css", "shared.js"]) copyFileSync(join(SRC, f), join(OUT, f));
+for (const f of ["app.css", "shared.js", "research.js"]) copyFileSync(join(SRC, f), join(OUT, f));
 copyFileSync(join(ROOT, "demo", "demo.js"), join(OUT, "demo.js"));
 
 // 絶対パス -> 相対パス。ファイルによって出てくるものが違うので、
 // 「全部あること」ではなく「置換後に1つも残っていないこと」で担保する。
 const REWRITE = [
+  ['src="/research.js"', 'src="research.js"'],
   ['href="/app.css"',  'href="app.css"'],
   ['src="/shared.js"', 'src="shared.js"'],
   ['href="/notes"',    'href="notes.html"'],
@@ -29,6 +30,7 @@ const ANCHOR = '<script src="shared.js"></script>';
 
 for (const [from, to] of [["chat.html", "index.html"], ["notes.html", "notes.html"]]) {
   let html = readFileSync(join(SRC, from), "utf8");
+  if(from === "chat.html") html = html.replace('$("webtoggle"), ', '').replace('webMode = WEB_MODES.includes(settings.web) ? settings.web : "research";', 'webMode = "off"; $("webtoggle").disabled = true;');
   for (const [a, b] of REWRITE) html = html.split(a).join(b);
 
   const left = html.match(LEFTOVER);

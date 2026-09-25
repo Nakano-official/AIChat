@@ -37,7 +37,7 @@
     <footer class="flex items-end gap-2 bg-base-200 border-t border-base-300 px-3 py-3"
             style="padding-bottom: calc(0.75rem + env(safe-area-inset-bottom));">
       <button id="mic" class="btn btn-ghost btn-square" title="音声入力">🎤</button>
-      <button id="webtoggle" class="btn btn-ghost btn-square" title="ウェブ検索（ONにすると発言を検索して結果を読みます）">🔍</button>
+      <button id="webtoggle" class="btn btn-ghost btn-square" title="検索語を考え、資料を選び、根拠と照合して回答します">🔍</button>
       <textarea id="input" rows="1"
         class="textarea textarea-bordered flex-1 min-w-0 resize-none min-h-12 max-h-44 text-base leading-relaxed"
         placeholder="メッセージ"></textarea>
@@ -119,6 +119,7 @@
 </dialog>
 
 <script src="/shared.js"></script>
+<script src="/research.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const serverEl=$("server"), modelEl=$("model"), chatEl=$("chat"), inputEl=$("input"),
@@ -148,6 +149,8 @@ const DEFAULT_PERSONAS = [
 ];
 let personas = load(LS.personas, DEFAULT_PERSONAS);
 let settings = load(LS.settings, { model: "", temp: 0.8, system: "", server: "", think: false });
+// 旧検索設定も初回のみ調査モードへ移行する。
+if(settings.researchVersion !== 1){ settings.web = "research"; settings.researchVersion = 1; save(LS.settings, settings); }
 if(settings.autoTitle === undefined) settings.autoTitle = true;
 if(settings.enterSend === undefined) settings.enterSend = !coarse;   // スマホは既定で「Enter=改行」
 if(settings.thinkTimeout === undefined) settings.thinkTimeout = 60;  // 秒。0で無効
@@ -184,11 +187,13 @@ async function saveCur(){
 
 // ===== 会話の新規 / 切替 / 削除 / 改名 =====
 function newConv(){
+  if(controller) return;
   cur = { id: genId(), title: "新しいチャット", messages: [] };
   curId = cur.id; save(LS.cur, curId);
   renderSidebar(); renderMessages(); focusInput(); closeDrawer();
 }
 async function openConv(id){
+  if(controller) return;
   try{
     cur = await (await fetch("/chats/api/get?id="+encodeURIComponent(id))).json();
     curId = cur.id; save(LS.cur, curId);
@@ -196,6 +201,7 @@ async function openConv(id){
   }catch(e){ setStatus("読み込み失敗","err"); }
 }
 async function deleteConv(id, title){
+  if(controller) return;
   if(!confirm("「" + (title || "新しいチャット") + "」を削除します。\n元に戻せません。")) return;
   await fetch("/chats/api/delete", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id}) });
   if(curId === id){ cur = null; curId = null; save(LS.cur, null); }
@@ -203,6 +209,7 @@ async function deleteConv(id, title){
   if(!cur){ if(convList.length) await openConv(convList[0].id); else newConv(); }
 }
 async function renameConv(id, title){
+  if(controller) return;
   const t = prompt("会話のタイトル", title || "");
   if(t === null) return;
   const name = t.trim(); if(!name) return;
@@ -338,6 +345,142 @@ function thinkLabel(m, streaming){
     s += "  ⚠️ 長引いています（停止して思考OFFで再試行を）";
   return s;
 }
+function paintResearch(wrap, research){
+  if(wrap._research) wrap._research.remove();
+  const details = document.createElement("details");
+  details.className = "text-xs mt-2";
+  const summary = document.createElement("summary");
+  summary.className = "cursor-pointer";
+  const labels = { tentative:"参考回答・ウェブでの確認は不十分", checked:"根拠と照合済み（AI判定）", partial:"一部の根拠が不足", incomplete:"結論を保留", unavailable:"確認できませんでした", stopped:"調査を停止" };
+  summary.textContent = "調査の詳細 · " + (labels[research.status] || "調査中");
+  details.appendChild(summary);
+  const body = document.createElement("div"); body.className = "space-y-2 mt-2 break-words";
+  function note(text){ const p = document.createElement("p"); p.textContent = text; body.appendChild(p); }
+  note("取得: " + (research.finishedAt || research.startedAt || "") + " · AIによる照合は正確さを保証するものではありません。");
+  if(research.fallbackReason) note("参考回答に切り替えた理由: " + research.fallbackReason);
+  for(const e of research.events || []) note(e.message);
+  if(research.status === "tentative") for(const p of research.searchSummaries || []){
+    note("検索結果の説明文（本文の確認とは異なります）: " + p.title + " — " + p.snippet);
+  }
+  for(const s of research.sources || []){
+    const a = document.createElement("a");
+    if(!/^https?:\/\//i.test(s.url)) continue;
+    a.href = s.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+    a.className = "link block"; a.textContent = s.id + ": " + (s.title || s.url);
+    body.appendChild(a);
+    for(const e of (research.evidence || []).filter(e => e.sourceId === s.id)) note(e.id + " 原文: 「" + e.quote + "」");
+  }
+  for(const c of research.checks || []){
+    const label = c.verdict === "supported" ? "採用" : (c.verdict === "conflicting" ? "除外・矛盾" : "除外・根拠不足");
+    note(label + " — " + c.text + " / " + c.evidenceIds.join(", ") + " / " + c.reason);
+  }
+  for(const missing of research.missing || []) note("未解決: " + missing);
+  details.appendChild(body); wrap._bubble.appendChild(details); wrap._research = details;
+}
+const RESEARCH_STAGE_UI = {
+  plan:['調査を組み立てています','🧭'], search:['ウェブを検索しています','🔎'],
+  select:['読むページを選んでいます','📑'], read:['ページを確認しています','🌐'],
+  gaps:['情報の抜けを確認しています','🧩'], draft:['根拠から回答を組み立てています','✍️'],
+  verify:['主張と根拠を照合しています','✓'], fallback:['参考回答を作っています','💡'],
+  warning:['別の方法を試しています','⚠️'],
+};
+function researchUrl(value){
+  try{ const u = new URL(value); return /^https?:$/.test(u.protocol) ? u : null; }catch{ return null; }
+}
+function clearResearchProgress(wrap){
+  if(wrap._researchLive) wrap._researchLive.remove();
+  wrap._researchLive = null;
+}
+function ensureResearchProgress(wrap){
+  if(wrap._researchLive) return wrap._researchLive;
+  const live = document.createElement('section'); live.className = 'research-live';
+  const scan = document.createElement('div'); scan.className = 'research-live-scan';
+  const header = document.createElement('div'); header.className = 'research-live-head';
+  const icon = document.createElement('span'); icon.className = 'research-live-icon';
+  const title = document.createElement('strong'); title.className = 'research-live-title';
+  const elapsed = document.createElement('span'); elapsed.className = 'research-live-elapsed';
+  header.append(icon, title, elapsed);
+  const current = document.createElement('div'); current.className = 'research-live-current';
+  current.setAttribute('role', 'status'); current.setAttribute('aria-live', 'polite');
+  const query = document.createElement('div'); query.className = 'research-live-query';
+  const stats = document.createElement('div'); stats.className = 'research-live-stats';
+  const pages = document.createElement('div'); pages.className = 'research-live-pages';
+  const timeline = document.createElement('div'); timeline.className = 'research-live-timeline';
+  live.append(scan, header, current, query, stats, pages, timeline);
+  wrap._bubble.insertBefore(live, wrap._ans);
+  Object.assign(live, { _icon:icon, _title:title, _elapsed:elapsed, _current:current,
+    _query:query, _stats:stats, _pages:pages, _timeline:timeline });
+  wrap._researchLive = live;
+  return live;
+}
+function paintResearchProgress(wrap, research, event){
+  const live = ensureResearchProgress(wrap);
+  const stage = event?.stage || 'plan';
+  const ui = RESEARCH_STAGE_UI[stage] || RESEARCH_STAGE_UI.plan;
+  const started = Date.parse(research.startedAt || '') || Date.now();
+  const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  const latestQuery = research.queries?.at(-1)
+    || (event?.message?.startsWith('検索: ') ? event.message.slice(4) : '');
+  live.dataset.stage = stage;
+  live._icon.textContent = ui[1];
+  live._title.textContent = ui[0];
+  live._elapsed.textContent = seconds + '秒';
+  live._current.textContent = event?.message || '調査を始めています…';
+  live._query.textContent = latestQuery ? '検索語: ' + latestQuery : '';
+  live._query.classList.toggle('hidden', !latestQuery);
+  const counts = [
+    '検索 ' + (research.queries?.length || 0) + '件',
+    '候補 ' + (research.searchSummaries?.length || 0) + '件',
+    '確認 ' + (research.sources?.length || 0) + 'ページ',
+    '根拠 ' + (research.evidence?.length || 0) + '件',
+  ];
+  live._stats.replaceChildren(...counts.map(value => {
+    const span = document.createElement('span'); span.textContent = value; return span;
+  }));
+  paintResearchPages(live, research, event);
+  paintResearchTimeline(live, research.events || []);
+}
+function paintResearchPages(live, research, event){
+  const items = [];
+  const currentMatch = event?.stage === 'read'
+    ? event.message.match(/本文を確認: (https?:\/\/\S+)/) : null;
+  if(currentMatch){
+    const url = researchUrl(currentMatch[1]);
+    if(url) items.push({ url:url.href, title:url.hostname, current:true });
+  }
+  for(const source of [...(research.sources || [])].reverse()){
+    if(items.some(item => item.url === source.url)) continue;
+    const url = researchUrl(source.url); if(!url) continue;
+    items.push({ url:url.href, title:source.title || url.hostname, current:false });
+    if(items.length >= 3) break;
+  }
+  live._pages.replaceChildren(...items.map(item => {
+    const row = document.createElement('div'); row.className = 'research-live-page';
+    const mark = document.createElement('span');
+    mark.textContent = item.current ? '◌' : '✓';
+    const info = document.createElement('div');
+    const link = document.createElement('a');
+    link.href = item.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    link.textContent = item.title;
+    const host = document.createElement('small');
+    host.textContent = (item.current ? '確認中 · ' : '確認済み · ') + new URL(item.url).hostname;
+    info.append(link, host); row.append(mark, info); return row;
+  }));
+  live._pages.classList.toggle('hidden', !items.length);
+}
+function paintResearchTimeline(live, events){
+  const recent = events.slice(-4);
+  live._timeline.replaceChildren(...recent.map((event, index) => {
+    const row = document.createElement('div');
+    row.className = 'research-live-step' + (index === recent.length - 1 ? ' is-active' : '');
+    const mark = document.createElement('span');
+    mark.textContent = index === recent.length - 1 ? '●' : '✓';
+    const message = document.createElement('span');
+    message.textContent = event.message;
+    row.append(mark, message); return row;
+  }));
+  live._timeline.classList.toggle('hidden', recent.length < 2);
+}
 function paintMessage(wrap, m, streaming){
   if(m.role === "user"){ wrap._bubble.textContent = m.content; return; }
   if(m.thinking){
@@ -349,6 +492,10 @@ function paintMessage(wrap, m, streaming){
   } else wrap._think.classList.add("hidden");
   wrap._ans.className = "md" + (streaming ? " cursor" : "");
   wrap._ans.innerHTML = renderMarkdown(streaming ? balanceFences(m.content) : m.content);
+  if(m.research){
+    clearResearchProgress(wrap);
+    paintResearch(wrap, m.research);
+  }
 }
 function mkBtn(label, fn){
   const b = document.createElement("button");
@@ -442,8 +589,10 @@ function editMessage(idx){
     cur.messages = cur.messages.slice(0, idx);          // ここから後ろは捨ててやり直す
     cur.messages.push({ role: "user", content: v });
     renderMessages();
+    controller = new AbortController(); setBusy(true); refreshActions();
     await saveCur();
-    await generate();
+    if(controller.signal.aborted){ controller = null; setBusy(false); refreshActions(); return; }
+    await generate({ operation: controller });
   };
   row.append(cancel, ok);
   bubble.append(ta, row);
@@ -479,13 +628,13 @@ let thinkVisible = false;      // いま思考UIを出しているか
 let gpuFit = load(LS.gpuFit, {});   // { model: true|false } 一度動かせば分かるので覚えておく
 const THINK_LEVELS = [["low","低（速い）"],["medium","中"],["high","高（じっくり）"]];
 
-async function probeThink(model){
+async function probeThink(model, signal){
   if(!model) return "bool";
   if(thinkCaps[model]) return thinkCaps[model];
   let kind = "bool";           // 判定できなければ無難に ON/OFF 扱い
   try{
     const r = await fetch(base()+"/api/show", { method:"POST",
-      headers:{"Content-Type":"application/json"}, body: JSON.stringify({ model }) });
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({ model }), signal });
     if(r.ok){
       const j = await r.json();
       if(!(j.capabilities||[]).includes("thinking")) kind = "none";
@@ -576,6 +725,7 @@ async function loadModels(){
 function setBusy(b){
   sendEl.textContent = b ? "■ 停止" : "送信";
   sendEl.className = "btn px-4 " + (b ? "btn-error" : "btn-primary");
+  for(const el of [modelEl, serverEl, $("webtoggle"), $("newchat")]) el.disabled = b;
 }
 async function send(){
   const text = inputEl.value.trim(); if(!text || controller) return;
@@ -587,14 +737,11 @@ async function send(){
   addMsgEl(m, cur.messages.length - 1);
   if(cur.title === "新しいチャット") cur.title = text.slice(0,24);
   refreshActions(); renderSidebar(); scrollDown(true);
-  await saveCur();           // ユーザー発言を即サーバー保存（他端末からも見える）
-  // ウェブから資料を集める。画面には出さず、モデルへ渡す分だけ m に持たせる。
-  // 再生成しても同じ資料で答えられるよう履歴にも保存する。
-  try{
-    const ctx = await buildWebContext(text);
-    if(ctx){ m.web = ctx; await saveCur(); }
-  }catch(e){ webNote("⚠️ ウェブ取得に失敗: " + e.message, "text-warning"); }
-  await generate();
+  controller = new AbortController(); setBusy(true); refreshActions();
+  await saveCur();
+  if(controller.signal.aborted){ controller = null; setBusy(false); refreshActions(); return; }
+  await generate({ operation: controller });
+
 }
 async function regenerate(){
   if(controller || !cur) return;
@@ -604,139 +751,62 @@ async function regenerate(){
   }
   await generate();
 }
-// ===== ウェブ検索 / URL読み込み ---------------------------------------------
-// このアプリで唯一、外部と通信する機能。何を外に出したかを必ず画面に出す。
-// 取り込んだ本文は user 発言の前に「資料」として足すだけで、履歴の形は変えない。
-const WEB_TOP_N    = 3;      // 検索結果から実際に読むページ数
-const WEB_MAX_PAGE = 2500;   // 1ページから取り込む文字数の上限
-const WEB_MAX_ALL  = 7000;   // 全体の上限（num_ctx 8192 を溢れさせないため）
-const URL_RE = /https?:\/\/[^\s<>"'）】」]+/g;
-
-let webMode = "off";         // 🔍トグル: "off"=URLのみ / "auto"=モデルが判断 / "always"=毎回検索
-
-function webNote(text, cls){
-  const d = document.createElement("div");
-  d.className = "text-xs px-4 py-1 " + (cls || "opacity-60");
-  d.textContent = text;
-  chatEl.appendChild(d); scrollDown(false);
-  return d;
-}
-
-// モデル自身に「検索が必要か」を判断させる（Ollama のツール呼び出し）。
-// 判定のために1往復ぶん余計に待つので、webMode==="auto" の時だけ実行する。
-// 検索語はモデルが組み立てるため、何を外に出したかを必ず画面に出すこと。
-const WEB_TOOLS = [{
-  type: "function",
-  function: {
-    name: "web_search",
-    description: "最新の情報や、自分が知らない事実を調べる必要があるときにウェブを検索する。"
-               + "一般常識・計算・雑談・文章の書き方の相談など、自分の知識で答えられることには使わない。",
-    parameters: {
-      type: "object",
-      properties: { query: { type: "string", description: "検索キーワード。質問文のままではなく、検索に適した短い語にする。" } },
-      required: ["query"],
-    },
-  },
-}];
-
-// 検索すべきならクエリ文字列、不要なら null を返す。失敗時も null（＝検索しない）。
-async function webDecide(text){
+// ===== 調査・根拠照合 =====
+let webMode = "research";
+async function generateResearched(opts = {}){
+  if(!cur || cur.messages.at(-1)?.role !== "user") return;
+  const conversation = cur, useModel = modelEl.value, endpoint = base(), style = systemEl.value;
+  const operation = opts.operation || new AbortController();
+  controller = operation; setBusy(true); refreshActions();
+  const wrap = buildShell("assistant");
+  chatEl.appendChild(wrap);
+  let audit = { version:1, model:useModel, status:"incomplete", events:[], sources:[], evidence:[], checks:[], missing:[], startedAt:new Date().toISOString() };
+  let result;
+  let latestProgress = { stage:'plan', message:'調査を始めています…' };
+  paintResearchProgress(wrap, audit, latestProgress);
+  const progressTimer = setInterval(() => paintResearchProgress(wrap, audit, latestProgress), 1000);
+  const allTimer = setTimeout(() => operation.abort("timeout"), 8 * 60 * 1000);
   try{
-    const r = await fetch(base()+"/api/chat", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ model: modelEl.value, stream:false, think:false, tools: WEB_TOOLS,
-        messages:[{ role:"user", content:text }],
-        // num_predict は実測で決めた値。小さすぎるとツール呼び出しのJSONが途中で切れ、
-        // tool_calls が消えて「黙って検索しない」状態になる（32では長い検索語が全滅）。
-        // 逆に大きいと、検索不要な時に通常の回答を書き始めて待ち時間が伸びる（200で最悪27秒）。
-        // 48: 短い質問5/5・長い検索語3/3・最悪6.4秒。
-        options:{ temperature:0.1, num_ctx:8192, num_predict:48 } }),
+    const kind = await probeThink(useModel, operation.signal);
+    operation.signal.throwIfAborted();
+    const client = WebResearch.createClient({ base:endpoint, model:useModel, think:kind === "level" ? "low" : false });
+    result = await WebResearch.run({
+      question:conversation.messages.at(-1).content,
+      history:conversation.messages.slice(0,-1).filter(m => !m.research || ["checked","partial","tentative"].includes(m.research.status)),
+      model:useModel, system:style, signal:operation.signal, ...client,
+      onProgress(event, state){
+        audit = state;
+        latestProgress = event;
+        paintResearchProgress(wrap, audit, latestProgress);
+        scrollDown(false);
+      },
     });
-    if(!r.ok) return null;
-    const j = await r.json();
-    const tc = ((j.message||{}).tool_calls||[])[0];
-    if(!tc || !tc.function || tc.function.name !== "web_search") return null;
-    const q = (tc.function.arguments||{}).query;
-    return (typeof q === "string" && q.trim()) ? q.trim().slice(0, 200) : null;
-  }catch(e){ return null; }
-}
-
-async function webSearch(query){
-  const r = await fetch(base()+"/web/api/search?q="+encodeURIComponent(query));
-  const j = await r.json();
-  if(!r.ok || j.error) throw new Error(j.error || ("HTTP "+r.status));
-  return j.results || [];
-}
-async function webFetch(url){
-  const r = await fetch(base()+"/web/api/fetch?url="+encodeURIComponent(url));
-  const j = await r.json();
-  if(!r.ok || j.error) throw new Error(j.error || ("HTTP "+r.status));
-  return j;
-}
-
-// 発言から資料ブロックを組み立てる。何も取れなければ空文字を返す。
-async function buildWebContext(text){
-  const urls = (text.match(URL_RE) || []).slice(0, 3);
-  const pages = [];
-
-  if(urls.length){                       // 本文にURLがあれば、検索せずそれを読む
-    const note = webNote("🔗 " + urls.length + "件のURLを読み込み中…");
-    for(const u of urls){
-      try{ const p = await webFetch(u); pages.push(p); }
-      catch(e){ webNote("⚠️ 読み込み失敗: " + u + " (" + e.message + ")", "text-warning"); }
-    }
-    note.remove();
-  } else if(webMode !== "off"){          // URLが無い時だけ検索を検討する
-    let query = text;
-    if(webMode === "auto"){              // モデルに要否を判断させる（1往復ぶん待つ）
-      const think = webNote("🔍 検索が必要か判断中…");
-      query = await webDecide(text);
-      think.remove();
-      if(!query) return "";              // 自分の知識で答えられる、と判断した
-      webNote("🔍 モデルの判断で検索します: 「" + query + "」");
-    }
-    const note = webNote("🔍 検索中: " + query.slice(0, 60));
-    let hits = [];
-    try{ hits = await webSearch(query); }
-    catch(e){ note.remove(); webNote("⚠️ 検索失敗: " + e.message, "text-warning"); return ""; }
-    note.remove();
-    if(!hits.length){ webNote("🔍 検索結果なし: " + query.slice(0, 60), "text-warning"); return ""; }
-    const list = webNote("🔍 「" + query.slice(0, 40) + "」→ 上位" + Math.min(WEB_TOP_N, hits.length) + "件を読み込み中…");
-    for(const h of hits.slice(0, WEB_TOP_N)){
-      try{ const p = await webFetch(h.url); pages.push({ ...p, title: p.title || h.title }); }
-      catch(e){ /* 1件失敗しても続ける */ }
-    }
-    list.remove();
+  }catch(e){
+    const stopped = operation.signal.aborted;
+    audit.status = stopped ? "stopped" : "unavailable"; audit.finishedAt = new Date().toISOString();
+    result = { content:stopped
+      ? (operation.signal.reason === "timeout" ? "調査が制限時間に達したため停止しました。" : "調査を停止しました。") + "未検証の回答は表示していません。再生成でやり直せます。"
+      : "調査を完了できませんでした: " + e.message, research:audit };
+  }finally{
+    clearTimeout(allTimer);
+    clearInterval(progressTimer);
+    const message = { role:"assistant", ...result, model:useModel };
+    conversation.messages.push(message);
+    paintMessage(wrap, message, false);
+    attachActions(wrap, message, conversation.messages.length-1); msgEls.push(wrap);
+    // 保存が終わるまで会話切替を抑止し、別会話への結果の混入を防ぐ。
+    await saveCur();
+    controller = null; setBusy(false); refreshActions(); focusInput(); scrollDown(false);
+    setStatus(result.research.status === "checked" ? "根拠との照合が完了" : result.research.status === "tentative" ? "参考回答（ウェブでの確認は不十分）" : "調査が終了しました");
+    refreshGpuFit().then(ch => { if(ch) syncThinkUI(); });
+    if(["checked","partial","tentative"].includes(result.research.status)) autoTitle();
   }
-  if(!pages.length) return "";
-
-  // 取り込んだ出典を画面に残す（あとから何を読んだか辿れるように）
-  const box = document.createElement("div");
-  box.className = "text-xs px-4 py-1 opacity-60 space-y-0.5";
-  box.appendChild(Object.assign(document.createElement("div"), { textContent: "📄 参照した資料" }));
-  for(const p of pages){
-    const a = document.createElement("a");
-    a.href = p.url; a.target = "_blank"; a.rel = "noopener noreferrer";
-    a.className = "link link-hover block truncate";
-    a.textContent = "・" + (p.title || p.url);
-    box.appendChild(a);
-  }
-  chatEl.appendChild(box); scrollDown(false);
-
-  let out = "", used = 0;
-  for(const p of pages){
-    if(used >= WEB_MAX_ALL) break;
-    const body = p.text.slice(0, Math.min(WEB_MAX_PAGE, WEB_MAX_ALL - used));
-    used += body.length;
-    out += "\n\n--- 資料: " + (p.title || p.url) + "\nURL: " + p.url + "\n" + body;
-  }
-  return "以下はウェブから取得した資料です。これを踏まえて質問に答えてください。"
-       + "資料に書かれていないことは推測せず、分からないと答えてください。" + out + "\n\n--- 資料ここまで ---\n\n";
 }
 
 // opts.think     : 思考モードの明示指定（未指定なら設定トグルに従う）
 // opts.noTimeout : この回だけ思考タイムアウトを無効にする（「もう一度（思考ON）」用）
 async function generate(opts = {}){
+  if(webMode === "research") return generateResearched(opts);
   // 会話履歴は role/content だけ送る（thinking はモデルに渡さない）
   const payload = cur.messages.map(m => ({ role: m.role, content: (m.web || "") + m.content }));
   if(systemEl.value.trim()) payload.unshift({ role:"system", content:systemEl.value.trim() });
@@ -958,7 +1028,7 @@ serverEl.onchange = () => { settings.server = serverEl.value; save(LS.settings, 
 modelEl.onchange = () => { settings.model = modelEl.value; save(LS.settings, settings); syncThinkUI(); keepWarm(); };
 tempEl.oninput = () => { tempValEl.textContent = parseFloat(tempEl.value).toFixed(1); settings.temp = parseFloat(tempEl.value); save(LS.settings, settings); };
 thinkEl.onchange = () => { settings.think = thinkParam(); save(LS.settings, settings); };
-const WEB_MODES = ["off", "auto", "always"];
+const WEB_MODES = ["research", "off"];
 $("webtoggle").onclick = () => {
   webMode = WEB_MODES[(WEB_MODES.indexOf(webMode) + 1) % WEB_MODES.length];
   settings.web = webMode; save(LS.settings, settings);
@@ -966,15 +1036,14 @@ $("webtoggle").onclick = () => {
 };
 function syncWebToggle(){
   const b = $("webtoggle");
-  b.textContent = webMode === "off" ? "🔍" : (webMode === "auto" ? "🔍 自" : "🔍 常");
-  b.classList.toggle("btn-ghost",   webMode === "off");
+  b.textContent = webMode === "off" ? "🔍 OFF" : "🔍 調査";
+  b.classList.toggle("btn-ghost", webMode === "off");
   b.classList.toggle("btn-primary", webMode !== "off");
-  b.classList.toggle("btn-square",  webMode === "off");
+  b.classList.remove("btn-square");
   b.title = webMode === "off"
-    ? "ウェブ検索: OFF（URLを貼った時だけ読み込みます）"
-    : webMode === "auto"
-      ? "ウェブ検索: 自動（必要かどうかをモデルが判断します。1往復ぶん遅くなります）"
-      : "ウェブ検索: 常時（毎回、発言をそのまま検索します）";
+    ? "検索・根拠照合: OFF"
+    : "検索・根拠照合: ON。検索語を考え、ページを選び、根拠と照合します。検索語は外部の検索サービスへ送信されます。";
+  b.setAttribute("aria-pressed", String(webMode === "research"));
 }
 $("autoTitle").onchange = (e) => { settings.autoTitle = e.target.checked; save(LS.settings, settings); };
 $("enterSend").onchange = (e) => { settings.enterSend = e.target.checked; save(LS.settings, settings); syncEnterHint(); };
@@ -1008,7 +1077,7 @@ tempEl.value = settings.temp ?? 0.8; tempValEl.textContent = parseFloat(tempEl.v
 $("autoTitle").checked = !!settings.autoTitle;
 $("enterSend").checked = !!settings.enterSend;
 $("thinkTimeout").value = settings.thinkTimeout;
-webMode = WEB_MODES.includes(settings.web) ? settings.web : (settings.web ? "always" : "off");  // 旧: true/false
+webMode = WEB_MODES.includes(settings.web) ? settings.web : "research";
 syncWebToggle();
 syncEnterHint();
 systemEl.oninput = () => { settings.system = systemEl.value; save(LS.settings, settings); };
